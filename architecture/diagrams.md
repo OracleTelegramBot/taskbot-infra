@@ -1,8 +1,7 @@
-# Diagramas C4 — TaskBot (vista rápida en GitHub)
+# Diagramas C4 — TaskBot
 
-> Estos diagramas en **Mermaid** se renderizan automáticamente al abrir este archivo en GitHub.
-> Son una capa de visualización cómoda; el artefacto de arquitectura formal es el modelo
-> **Structurizr** (`model.dsl` + `model.json`), que se renderiza con Structurizr Lite (ver `README.md`).
+> Los diagramos son construidos en **Mermaid** y se renderizan automáticamente en Github.
+> **Structurizr** (`model.dsl` + `model.json`) se renderiza con Structurizr Lite.
 
 ---
 
