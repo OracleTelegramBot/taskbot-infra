@@ -1,0 +1,1726 @@
+{
+  "configuration" : { },
+  "description" : "Modelo de arquitectura C4 de la plataforma de gestión de tareas TaskBot (Sprint 3).",
+  "documentation" : {
+    "decisions" : [ {
+      "content" : "# 1. Estilos de arquitectura seleccionados\n\nDate: 2026-05-29\n\n## Status\n\nAccepted\n\n## Context\n\nTaskBot debe soportar varios flujos concurrentes (un developer actualiza tareas mientras el sistema calcula KPIs y envía notificaciones), evolucionar por partes sin re-desplegar todo, escalar de forma desigual (el chatbot y las tareas reciben más carga que la autenticación) y reaccionar a eventos del dominio (tarea bloqueada, sprint por vencer, tarea completada). En Sprint 1 identificamos 8 componentes agrupados en 5 bounded contexts mediante Event Storming.\n\nDe los nueve estilos de arquitectura estudiados —Layered, Pipeline, Microkernel, Service-based, Event-driven, Space-based, Orchestration-driven SOA, Microservices y la dicotomía monolítico/distribuido que los enmarca— ningún estilo único cubre bien todos los drivers. Es necesario elegir un estilo primario y combinarlo con estilos de apoyo aplicados en lugares concretos.\n\n## Decision\n\nAdoptamos una combinación de tres estilos, cada uno aplicado donde aporta más valor:\n\n1. **Microservices (estilo primario, nivel sistema).** El sistema se descompone en 5 servicios desplegables de forma independiente (`auth-service`, `task-service`, `kpi-service`, `ai-service`, `telegram-service`), cada uno dueño de su bounded context y con su propio ciclo de build/deploy en GitHub Actions y escalado independiente (2 réplicas por servicio en OKE). El borde se resuelve con un API Gateway (NGINX Ingress) que enruta por path.\n\n2. **Event-driven (estilo secundario, comunicación reactiva).** Los flujos críticos del dominio se modelan como reacciones a eventos: `tarea completada -> task-service dispara cálculo de KPI en kpi-service`, `estado = Blocked -> task-service notifica a telegram-service`, `sprint próximo a vencer -> alerta a telegram-service`, y en operación `fallo post-deploy -> OCI Function crea ticket en Jira`. Esto desacopla a los productores de los consumidores de cada evento.\n\n3. **Layered (estilo de apoyo, nivel intra-servicio).** Dentro de cada microservicio se aplica una arquitectura por capas: Controller (API REST) -> Service (lógica de negocio) -> Repository (acceso a datos) -> base de datos. A nivel macro, el sistema también se organiza en capas técnicas: Presentación (SPA) -> Gateway (Ingress) -> Negocio (servicios) -> Datos (Oracle ATP).\n\nLos demás estilos se descartaron: Pipeline y Microkernel no encajan con un dominio de flujos paralelos; Service-based sería una versión más gruesa de lo que ya logramos con microservicios; Space-based resuelve una escala/elasticidad extrema que no necesitamos; y Orchestration-driven SOA introduce un orquestador central que añade acoplamiento innecesario para 5 servicios.\n\n## Consequences\n\n**Positivas:**\n- Despliegue, escalado y evolución independientes por servicio.\n- Las capas hacen cada servicio fácil de entender y testear.\n- La comunicación por eventos mantiene a los servicios desacoplados y permite añadir consumidores nuevos sin tocar a los productores.\n- Cada estilo es localizable en el modelo C4: microservicios en la vista de Containers, capas en la de Components, eventos en las vistas Dynamic.\n\n**Negativas / trade-offs:**\n- Mayor complejidad operativa: red, observabilidad distribuida y consistencia eventual entre servicios.\n- La comunicación entre servicios (REST/Feign hoy) introduce latencia y modos de fallo que no existen en un monolito.\n- Requiere disciplina para que las capas no se salten (p. ej. un Controller llamando directamente a un Repository).\n\n## Notas\n\n> La lista de los nueve estilos sigue la taxonomía de *Fundamentals of Software Architecture* (Richards & Ford). Si el material del curso usa una enumeración distinta, esta es la referencia a ajustar; el mapeo estilo -> dónde se aplica no cambia.\n",
+      "date" : "2026-05-29T00:00:00Z",
+      "format" : "Markdown",
+      "id" : "1",
+      "status" : "Accepted",
+      "title" : "Estilos de arquitectura seleccionados"
+    }, {
+      "content" : "# 2. NGINX Ingress Controller como API Gateway\n\nDate: 2026-05-29\n\n## Status\n\nAccepted\n\n## Context\n\nEl sistema necesita un único punto de entrada que enrute las peticiones HTTP a los 5 microservicios y al frontend, termine TLS para `sammy-ulfh.dev` y exponga rutas estables (`/api/v1/auth`, `/api/tasks`, `/api/sprints`, `/api/ai`, `/api/webhook/telegram`, el catch-all `/api`, y las rutas de Swagger). En la exploración inicial de Sprint 1 se asumió Spring Cloud Gateway como puerta de enlace. Al desplegar sobre OKE, todo el tráfico entrante ya pasa por un Ingress de Kubernetes asociado al Production Load Balancer.\n\n## Decision\n\nUsamos **NGINX Ingress Controller** (namespace `ingress-nginx`) como API Gateway, en lugar de Spring Cloud Gateway. El ruteo por path, la terminación TLS (con cert-manager + Let's Encrypt) y el balanceo se definen como reglas de Ingress de Kubernetes. No se despliega un servicio gateway propio de Spring.\n\n## Consequences\n\n**Positivas:**\n- Un componente menos que construir, desplegar y operar (no hay un microservicio gateway adicional).\n- El ruteo y el TLS son nativos de la plataforma (Kubernetes/OKE), declarativos en YAML y versionados junto a los manifests.\n- cert-manager automatiza la emisión y renovación de certificados.\n\n**Negativas / trade-offs:**\n- Las capacidades avanzadas que ofrece Spring Cloud Gateway (filtros programáticos, circuit breakers, rate limiting fino por código) ya no están en el borde; si se necesitan, se resuelven con anotaciones de NGINX o se mueven a cada servicio.\n- El equipo debe dominar la sintaxis de Ingress y el ciclo de NGINX en vez de configuración Java.\n- El mapeo de rutas vive en infraestructura, no en el código de aplicación, lo que separa responsabilidades entre los equipos de app y de plataforma.\n",
+      "date" : "2026-05-29T00:00:00Z",
+      "format" : "Markdown",
+      "id" : "2",
+      "status" : "Accepted",
+      "title" : "NGINX Ingress Controller como API Gateway"
+    }, {
+      "content" : "# 3. CI/CD con GitHub Actions y GHCR\n\nDate: 2026-05-29\n\n## Status\n\nAccepted\n\n## Context\n\nEl sistema requiere un pipeline que, ante un cambio, construya las imágenes Docker de los microservicios, las publique en un registro y las despliegue a OKE con una aprobación manual antes de producción. Una opción evaluada fue OCI DevOps (Code Repository + Build/Deployment Pipelines + Container Registry, todo dentro de OCI). El código fuente del equipo ya vive en GitHub.\n\n## Decision\n\nImplementamos el CI/CD con **GitHub Actions** y publicamos las imágenes en **GitHub Container Registry (GHCR)**, en lugar de OCI DevOps y OCI Container Registry.\n\n- Workflow de **Build**: `on: push` a `main` con path filters para construir solo el servicio que cambió; `mvn package` (JAR, o WAR para `kpi-service`), `docker build` con base `eclipse-temurin:17-jre-alpine` y push a `ghcr.io/<org>/taskbot/<servicio>` con tags `:<git-sha>` y `:latest`.\n- Workflow de **Deploy**: configura `kubectl` con un kubeconfig guardado como GitHub Secret y despliega a OKE.\n- La **aprobación manual** se implementa con un GitHub Environment `production` con required reviewers.\n- OKE se autentica contra GHCR mediante un `imagePullSecret`.\n\n## Consequences\n\n**Positivas:**\n- Un solo lugar (GitHub) para código, pipelines, registro y revisiones de PR.\n- Los workflows son YAML versionados junto al código; fáciles de revisar y reproducir.\n- GHCR se integra de forma nativa con los permisos del repositorio y el `GITHUB_TOKEN`.\n- No se crea ni mantiene un Container Registry en OCI.\n\n**Negativas / trade-offs:**\n- La autenticación GitHub -> OKE depende de un kubeconfig en un Secret; hay que rotarlo y custodiarlo con cuidado.\n- Se pierde la integración nativa de OCI DevOps con el resto de la consola de OCI.\n- Los runners de GitHub son externos a OCI: el tráfico de deploy sale y entra a la red del cluster, lo que exige reglas de red y credenciales bien acotadas.\n",
+      "date" : "2026-05-29T00:00:00Z",
+      "format" : "Markdown",
+      "id" : "3",
+      "status" : "Accepted",
+      "title" : "CI/CD con GitHub Actions y GHCR"
+    }, {
+      "content" : "# 4. Autenticación stateless con JWT\n\nDate: 2026-05-29\n\n## Status\n\nAccepted\n\n## Context\n\nCon varios microservicios desplegados en réplicas detrás de un balanceador, las peticiones de un mismo usuario pueden caer en instancias distintas. Mantener sesiones en memoria del servidor obligaría a afinidad de sesión o a un almacén de sesiones compartido, lo que añade acoplamiento y un punto de fallo. El sistema maneja tres roles (Admin, PM, Developer) que deben respetarse en cada servicio.\n\n## Decision\n\nUsamos **autenticación stateless basada en JWT**. `auth-service` valida credenciales (con hash BCrypt contra la Autonomous DB) y emite un JWT firmado que incluye el rol. El token viaja en cada petición y cada microservicio lo valida localmente con la clave compartida (`jwt-secret`, inyectada como Kubernetes Secret). No se guarda estado de sesión en el servidor.\n\n## Consequences\n\n**Positivas:**\n- Cualquier réplica de cualquier servicio puede atender cualquier petición sin sesión compartida ni afinidad: encaja con el escalado horizontal en OKE.\n- La autorización por rol viaja en el token y se verifica en el borde y en cada servicio.\n- Menos infraestructura: no hace falta un store de sesiones.\n\n**Negativas / trade-offs:**\n- La revocación inmediata de un token es difícil; se mitiga con expiraciones cortas y, si hiciera falta, una lista de revocación.\n- La clave de firma (`jwt-secret`) es un secreto crítico: su fuga compromete todo el sistema; debe custodiarse en el Vault/Secret y rotarse.\n- El token no debe llevar datos sensibles, ya que su payload es legible por el cliente.\n",
+      "date" : "2026-05-29T00:00:00Z",
+      "format" : "Markdown",
+      "id" : "4",
+      "status" : "Accepted",
+      "title" : "Autenticación stateless con JWT"
+    }, {
+      "content" : "# 5. Base de datos Oracle ATP compartida (schema por servicio)\n\nDate: 2026-05-29\n\n## Status\n\nAccepted\n\n## Context\n\nUn sistema de microservicios \"puro\" suele recomendar una base de datos por servicio para máximo desacoplamiento. Sin embargo, el proyecto cuenta con una única **Oracle Autonomous Database (ATP)** ya provisionada (`gestiondetareasbd_tp`), a la que los servicios se conectan vía wallet montado en `/app/Wallet`. Provisionar y operar una base por servicio tendría un costo y una complejidad que el alcance académico del proyecto no justifica.\n\n## Decision\n\nLos microservicios comparten la **misma instancia Oracle ATP**, pero cada uno es dueño de sus propias tablas/esquema lógico (usuarios y roles para `auth-service`; tareas, proyectos y sprints para `task-service`; snapshots de KPI para `kpi-service`; historial de chat para `ai-service`). `telegram-service` no persiste estado propio. La regla de oro es que **ningún servicio lee ni escribe tablas que no le pertenecen**: si necesita datos de otro, los pide por su API REST (p. ej. `ai-service -> task-service` para el contexto).\n\n## Consequences\n\n**Positivas:**\n- Aprovecha la infraestructura existente: una sola base que administrar, respaldar y conectar.\n- Conserva el principio clave de propiedad de datos por servicio aunque la instancia física sea compartida.\n- Menor costo y complejidad operativa que una base por servicio.\n\n**Negativas / trade-offs:**\n- La instancia compartida es un punto único de fallo y un posible cuello de botella de escalado.\n- El aislamiento depende de disciplina del equipo, no de una frontera física; un acceso indebido entre esquemas no está impedido por la infraestructura.\n- Migrar en el futuro a base-por-servicio exige separar esquemas y conexiones; conviene mantener los límites limpios desde ahora para facilitarlo.\n",
+      "date" : "2026-05-29T00:00:00Z",
+      "format" : "Markdown",
+      "id" : "5",
+      "status" : "Accepted",
+      "title" : "Base de datos Oracle ATP compartida (schema por servicio)"
+    } ]
+  },
+  "id" : 1,
+  "lastModifiedDate" : "2026-05-29T21:17:48Z",
+  "model" : {
+    "deploymentNodes" : [ {
+      "description" : "Repositorio, CI/CD y registro de imágenes",
+      "environment" : "Production",
+      "id" : "62",
+      "infrastructureNodes" : [ {
+        "description" : "Pipelines de Build y Deploy (approval manual)",
+        "environment" : "Production",
+        "id" : "63",
+        "name" : "GitHub Actions",
+        "properties" : {
+          "structurizr.dsl.identifier" : "production.github.ghActions"
+        },
+        "relationships" : [ {
+          "description" : "Publica imágenes",
+          "destinationId" : "64",
+          "id" : "109",
+          "sourceId" : "63",
+          "tags" : "Relationship",
+          "technology" : "docker push"
+        }, {
+          "description" : "Despliega manifests al namespace inactivo",
+          "destinationId" : "67",
+          "id" : "110",
+          "sourceId" : "63",
+          "tags" : "Relationship",
+          "technology" : "kubectl apply"
+        } ],
+        "tags" : "Element,Infrastructure Node",
+        "technology" : "Workflows YAML"
+      }, {
+        "description" : "Registro de imágenes Docker (ghcr.io/<org>/taskbot)",
+        "environment" : "Production",
+        "id" : "64",
+        "name" : "GHCR",
+        "properties" : {
+          "structurizr.dsl.identifier" : "production.github.ghcr"
+        },
+        "tags" : "Element,Infrastructure Node",
+        "technology" : "Container Registry"
+      } ],
+      "instances" : "1",
+      "name" : "GitHub",
+      "properties" : {
+        "structurizr.dsl.identifier" : "production.github"
+      },
+      "tags" : "Element,Deployment Node",
+      "technology" : "GitHub"
+    }, {
+      "children" : [ {
+        "children" : [ {
+          "children" : [ {
+            "containerInstances" : [ {
+              "containerId" : "10",
+              "environment" : "Production",
+              "id" : "69",
+              "instanceId" : 1,
+              "properties" : {
+                "structurizr.dsl.identifier" : "production.oci.prodLb.oke.ingressNs.ingressInstance"
+              },
+              "relationships" : [ {
+                "description" : "Enruta /api/v1/auth, /swagger-auth",
+                "destinationId" : "75",
+                "id" : "76",
+                "linkedRelationshipId" : "31",
+                "sourceId" : "69",
+                "technology" : "HTTP"
+              }, {
+                "description" : "Enruta /api/tasks, /swagger-tasks",
+                "destinationId" : "78",
+                "id" : "79",
+                "linkedRelationshipId" : "33",
+                "sourceId" : "69",
+                "technology" : "HTTP"
+              }, {
+                "description" : "Enruta /api, /swagger-ui (catch-all)",
+                "destinationId" : "81",
+                "id" : "82",
+                "linkedRelationshipId" : "35",
+                "sourceId" : "69",
+                "technology" : "HTTP"
+              }, {
+                "description" : "Enruta /api/ai, /swagger-ia",
+                "destinationId" : "85",
+                "id" : "86",
+                "linkedRelationshipId" : "36",
+                "sourceId" : "69",
+                "technology" : "HTTP"
+              }, {
+                "description" : "Enruta /api/webhook/telegram, /api/anuncios",
+                "destinationId" : "89",
+                "id" : "90",
+                "linkedRelationshipId" : "37",
+                "sourceId" : "69",
+                "technology" : "HTTP"
+              } ],
+              "tags" : "Container Instance"
+            } ],
+            "description" : "Namespace de ingress",
+            "environment" : "Production",
+            "id" : "68",
+            "instances" : "1",
+            "name" : "ingress-nginx",
+            "properties" : {
+              "structurizr.dsl.identifier" : "production.oci.prodLb.oke.ingressNs"
+            },
+            "tags" : "Element,Deployment Node",
+            "technology" : "Kubernetes Namespace"
+          }, {
+            "children" : [ {
+              "containerInstances" : [ {
+                "containerId" : "9",
+                "environment" : "Production",
+                "id" : "72",
+                "instanceId" : 1,
+                "properties" : {
+                  "structurizr.dsl.identifier" : "production.oci.prodLb.oke.vsblue.feNode.spaInstance"
+                },
+                "relationships" : [ {
+                  "description" : "Realiza llamadas a la API",
+                  "destinationId" : "69",
+                  "id" : "73",
+                  "linkedRelationshipId" : "30",
+                  "sourceId" : "72",
+                  "technology" : "HTTPS/JSON"
+                } ],
+                "tags" : "Container Instance"
+              } ],
+              "environment" : "Production",
+              "id" : "71",
+              "instances" : "2",
+              "name" : "frontend",
+              "properties" : {
+                "structurizr.dsl.identifier" : "production.oci.prodLb.oke.vsblue.feNode"
+              },
+              "tags" : "Element,Deployment Node",
+              "technology" : "Pod (2 réplicas)"
+            }, {
+              "containerInstances" : [ {
+                "containerId" : "11",
+                "environment" : "Production",
+                "id" : "75",
+                "instanceId" : 1,
+                "properties" : {
+                  "structurizr.dsl.identifier" : "production.oci.prodLb.oke.vsblue.authNode.authInstance"
+                },
+                "relationships" : [ {
+                  "description" : "Lee/escribe usuarios y roles",
+                  "destinationId" : "94",
+                  "id" : "95",
+                  "linkedRelationshipId" : "38",
+                  "sourceId" : "75",
+                  "technology" : "JDBC + Wallet"
+                } ],
+                "tags" : "Container Instance"
+              } ],
+              "environment" : "Production",
+              "id" : "74",
+              "instances" : "2",
+              "name" : "auth-service",
+              "properties" : {
+                "structurizr.dsl.identifier" : "production.oci.prodLb.oke.vsblue.authNode"
+              },
+              "tags" : "Element,Deployment Node",
+              "technology" : "Pod (2 réplicas)"
+            }, {
+              "containerInstances" : [ {
+                "containerId" : "12",
+                "environment" : "Production",
+                "id" : "78",
+                "instanceId" : 1,
+                "properties" : {
+                  "structurizr.dsl.identifier" : "production.oci.prodLb.oke.vsblue.taskNode.taskInstance"
+                },
+                "relationships" : [ {
+                  "description" : "Dispara cálculo de KPI",
+                  "destinationId" : "81",
+                  "id" : "83",
+                  "linkedRelationshipId" : "53",
+                  "sourceId" : "78",
+                  "technology" : "REST (Feign)"
+                }, {
+                  "description" : "Notifica tarea bloqueada",
+                  "destinationId" : "89",
+                  "id" : "91",
+                  "linkedRelationshipId" : "55",
+                  "sourceId" : "78",
+                  "technology" : "REST"
+                }, {
+                  "description" : "Persiste tareas",
+                  "destinationId" : "94",
+                  "id" : "96",
+                  "linkedRelationshipId" : "58",
+                  "sourceId" : "78",
+                  "technology" : "JDBC + Wallet"
+                } ],
+                "tags" : "Container Instance"
+              } ],
+              "environment" : "Production",
+              "id" : "77",
+              "instances" : "2",
+              "name" : "task-service",
+              "properties" : {
+                "structurizr.dsl.identifier" : "production.oci.prodLb.oke.vsblue.taskNode"
+              },
+              "tags" : "Element,Deployment Node",
+              "technology" : "Pod (2 réplicas)"
+            }, {
+              "containerInstances" : [ {
+                "containerId" : "20",
+                "environment" : "Production",
+                "id" : "81",
+                "instanceId" : 1,
+                "properties" : {
+                  "structurizr.dsl.identifier" : "production.oci.prodLb.oke.vsblue.kpiNode.kpiInstance"
+                },
+                "relationships" : [ {
+                  "description" : "Lee datos operativos y persiste snapshots de KPI",
+                  "destinationId" : "94",
+                  "id" : "97",
+                  "linkedRelationshipId" : "39",
+                  "sourceId" : "81",
+                  "technology" : "JDBC + Wallet"
+                } ],
+                "tags" : "Container Instance"
+              } ],
+              "environment" : "Production",
+              "id" : "80",
+              "instances" : "2",
+              "name" : "kpi-service",
+              "properties" : {
+                "structurizr.dsl.identifier" : "production.oci.prodLb.oke.vsblue.kpiNode"
+              },
+              "tags" : "Element,Deployment Node",
+              "technology" : "Pod (2 réplicas)"
+            }, {
+              "containerInstances" : [ {
+                "containerId" : "21",
+                "environment" : "Production",
+                "id" : "85",
+                "instanceId" : 1,
+                "properties" : {
+                  "structurizr.dsl.identifier" : "production.oci.prodLb.oke.vsblue.aiNode.aiInstance"
+                },
+                "relationships" : [ {
+                  "description" : "Obtiene contexto de tareas y sprints activos",
+                  "destinationId" : "78",
+                  "id" : "87",
+                  "linkedRelationshipId" : "42",
+                  "sourceId" : "85",
+                  "technology" : "REST"
+                }, {
+                  "description" : "Lee/escribe historial de conversaciones",
+                  "destinationId" : "94",
+                  "id" : "98",
+                  "linkedRelationshipId" : "40",
+                  "sourceId" : "85",
+                  "technology" : "JDBC + Wallet"
+                }, {
+                  "description" : "Envía el prompt con el contexto del proyecto",
+                  "destinationId" : "102",
+                  "id" : "103",
+                  "linkedRelationshipId" : "43",
+                  "sourceId" : "85",
+                  "technology" : "HTTPS (completions)"
+                } ],
+                "tags" : "Container Instance"
+              } ],
+              "environment" : "Production",
+              "id" : "84",
+              "instances" : "2",
+              "name" : "ai-service",
+              "properties" : {
+                "structurizr.dsl.identifier" : "production.oci.prodLb.oke.vsblue.aiNode"
+              },
+              "tags" : "Element,Deployment Node",
+              "technology" : "Pod (2 réplicas)"
+            }, {
+              "containerInstances" : [ {
+                "containerId" : "22",
+                "environment" : "Production",
+                "id" : "89",
+                "instanceId" : 1,
+                "properties" : {
+                  "structurizr.dsl.identifier" : "production.oci.prodLb.oke.vsblue.telegramNode.telegramInstance"
+                },
+                "relationships" : [ {
+                  "description" : "Envía mensajes al canal del equipo",
+                  "destinationId" : "105",
+                  "id" : "106",
+                  "linkedRelationshipId" : "45",
+                  "sourceId" : "89",
+                  "technology" : "HTTPS (sendMessage)"
+                } ],
+                "tags" : "Container Instance"
+              } ],
+              "environment" : "Production",
+              "id" : "88",
+              "instances" : "2",
+              "name" : "telegram-service",
+              "properties" : {
+                "structurizr.dsl.identifier" : "production.oci.prodLb.oke.vsblue.telegramNode"
+              },
+              "tags" : "Element,Deployment Node",
+              "technology" : "Pod (2 réplicas)"
+            } ],
+            "description" : "Namespace activo · estrategia Blue/Green · imagen base eclipse-temurin:17-jre-alpine",
+            "environment" : "Production",
+            "id" : "70",
+            "infrastructureNodes" : [ {
+              "description" : "db/jwt/openai/telegram creds · oracle-wallet (/app/Wallet) · taskbot-config",
+              "environment" : "Production",
+              "id" : "92",
+              "name" : "Secrets & ConfigMap",
+              "properties" : {
+                "structurizr.dsl.identifier" : "production.oci.prodLb.oke.vsblue.config"
+              },
+              "tags" : "Element,Infrastructure Node",
+              "technology" : "Kubernetes"
+            } ],
+            "instances" : "1",
+            "name" : "Namespace vs-blue",
+            "properties" : {
+              "structurizr.dsl.identifier" : "production.oci.prodLb.oke.vsblue"
+            },
+            "tags" : "Element,Deployment Node",
+            "technology" : "Kubernetes Namespace"
+          } ],
+          "description" : "taskbot-oke-cluster · node pool >= 2 nodos",
+          "environment" : "Production",
+          "id" : "67",
+          "instances" : "1",
+          "name" : "OKE Cluster",
+          "properties" : {
+            "structurizr.dsl.identifier" : "production.oci.prodLb.oke"
+          },
+          "tags" : "Element,Deployment Node",
+          "technology" : "Oracle Container Engine for Kubernetes"
+        } ],
+        "description" : "Balanceador público (taskbot-prod-lb)",
+        "environment" : "Production",
+        "id" : "66",
+        "instances" : "1",
+        "name" : "Production Load Balancer",
+        "properties" : {
+          "structurizr.dsl.identifier" : "production.oci.prodLb"
+        },
+        "tags" : "Element,Deployment Node",
+        "technology" : "OCI Load Balancer"
+      }, {
+        "containerInstances" : [ {
+          "containerId" : "23",
+          "environment" : "Production",
+          "id" : "94",
+          "instanceId" : 1,
+          "properties" : {
+            "structurizr.dsl.identifier" : "production.oci.atp.dbInstance"
+          },
+          "tags" : "Container Instance"
+        } ],
+        "description" : "gestiondetareasbd_tp",
+        "environment" : "Production",
+        "id" : "93",
+        "instances" : "1",
+        "name" : "Oracle Autonomous DB (ATP)",
+        "properties" : {
+          "structurizr.dsl.identifier" : "production.oci.atp"
+        },
+        "tags" : "Element,Deployment Node",
+        "technology" : "Oracle ATP"
+      }, {
+        "description" : "Logging · Monitoring · Notification",
+        "environment" : "Production",
+        "id" : "99",
+        "infrastructureNodes" : [ {
+          "description" : "Crea tickets Bug ante fallos post-deploy",
+          "environment" : "Production",
+          "id" : "100",
+          "name" : "fn-jira-ticket-creator",
+          "properties" : {
+            "structurizr.dsl.identifier" : "production.oci.observability.fnJira"
+          },
+          "relationships" : [ {
+            "description" : "Crea ticket Bug ante fallo",
+            "destinationId" : "108",
+            "id" : "111",
+            "sourceId" : "100",
+            "tags" : "Relationship",
+            "technology" : "REST"
+          } ],
+          "tags" : "Element,Infrastructure Node",
+          "technology" : "OCI Functions"
+        } ],
+        "instances" : "1",
+        "name" : "OCI Observability",
+        "properties" : {
+          "structurizr.dsl.identifier" : "production.oci.observability"
+        },
+        "tags" : "Element,Deployment Node",
+        "technology" : "OCI"
+      } ],
+      "description" : "Región mx-queretaro-1",
+      "environment" : "Production",
+      "id" : "65",
+      "instances" : "1",
+      "name" : "Oracle Cloud Infrastructure",
+      "properties" : {
+        "structurizr.dsl.identifier" : "production.oci"
+      },
+      "tags" : "Element,Deployment Node",
+      "technology" : "OCI"
+    }, {
+      "description" : "SaaS externo",
+      "environment" : "Production",
+      "id" : "101",
+      "instances" : "1",
+      "name" : "OpenAI",
+      "properties" : {
+        "structurizr.dsl.identifier" : "production.openaiNode"
+      },
+      "softwareSystemInstances" : [ {
+        "environment" : "Production",
+        "id" : "102",
+        "instanceId" : 1,
+        "properties" : {
+          "structurizr.dsl.identifier" : "production.openaiNode.openaiInstance"
+        },
+        "softwareSystemId" : "4",
+        "tags" : "Software System Instance"
+      } ],
+      "tags" : "Element,Deployment Node",
+      "technology" : "Cloud"
+    }, {
+      "description" : "SaaS externo",
+      "environment" : "Production",
+      "id" : "104",
+      "instances" : "1",
+      "name" : "Telegram",
+      "properties" : {
+        "structurizr.dsl.identifier" : "production.telegramExtNode"
+      },
+      "softwareSystemInstances" : [ {
+        "environment" : "Production",
+        "id" : "105",
+        "instanceId" : 1,
+        "properties" : {
+          "structurizr.dsl.identifier" : "production.telegramExtNode.telegramExtInstance"
+        },
+        "softwareSystemId" : "5",
+        "tags" : "Software System Instance"
+      } ],
+      "tags" : "Element,Deployment Node",
+      "technology" : "Cloud"
+    }, {
+      "description" : "SaaS externo",
+      "environment" : "Production",
+      "id" : "107",
+      "instances" : "1",
+      "name" : "Atlassian",
+      "properties" : {
+        "structurizr.dsl.identifier" : "production.atlassianNode"
+      },
+      "softwareSystemInstances" : [ {
+        "environment" : "Production",
+        "id" : "108",
+        "instanceId" : 1,
+        "properties" : {
+          "structurizr.dsl.identifier" : "production.atlassianNode.jiraInstance"
+        },
+        "softwareSystemId" : "6",
+        "tags" : "Software System Instance"
+      } ],
+      "tags" : "Element,Deployment Node",
+      "technology" : "Cloud"
+    } ],
+    "people" : [ {
+      "description" : "Administra el sistema: registra usuarios y asigna roles.",
+      "id" : "1",
+      "name" : "Admin",
+      "properties" : {
+        "structurizr.dsl.identifier" : "admin"
+      },
+      "relationships" : [ {
+        "description" : "Registra usuarios y asigna roles",
+        "destinationId" : "9",
+        "id" : "28",
+        "sourceId" : "1",
+        "tags" : "Relationship",
+        "technology" : "HTTPS"
+      }, {
+        "description" : "Registra usuarios y asigna roles",
+        "destinationId" : "8",
+        "id" : "29",
+        "linkedRelationshipId" : "28",
+        "sourceId" : "1",
+        "technology" : "HTTPS"
+      } ],
+      "tags" : "Element,Person,Actor"
+    }, {
+      "description" : "Crea proyectos, define e inicia/cierra sprints, asigna tareas y consulta KPIs.",
+      "id" : "2",
+      "name" : "Project Manager",
+      "properties" : {
+        "structurizr.dsl.identifier" : "pm"
+      },
+      "relationships" : [ {
+        "description" : "Gestiona proyectos, sprints, tareas y consulta KPIs",
+        "destinationId" : "9",
+        "id" : "26",
+        "sourceId" : "2",
+        "tags" : "Relationship",
+        "technology" : "HTTPS"
+      }, {
+        "description" : "Gestiona proyectos, sprints, tareas y consulta KPIs",
+        "destinationId" : "8",
+        "id" : "27",
+        "linkedRelationshipId" : "26",
+        "sourceId" : "2",
+        "technology" : "HTTPS"
+      } ],
+      "tags" : "Element,Person,Actor"
+    }, {
+      "description" : "Actualiza tareas y estados, registra horas, usa el tablero Kanban y el chatbot.",
+      "id" : "3",
+      "name" : "Developer",
+      "properties" : {
+        "structurizr.dsl.identifier" : "dev"
+      },
+      "relationships" : [ {
+        "description" : "Gestiona sus tareas, usa el Kanban y consulta el chatbot",
+        "destinationId" : "9",
+        "id" : "24",
+        "sourceId" : "3",
+        "tags" : "Relationship",
+        "technology" : "HTTPS"
+      }, {
+        "description" : "Gestiona sus tareas, usa el Kanban y consulta el chatbot",
+        "destinationId" : "8",
+        "id" : "25",
+        "linkedRelationshipId" : "24",
+        "sourceId" : "3",
+        "technology" : "HTTPS"
+      } ],
+      "tags" : "Element,Person,Actor"
+    } ],
+    "softwareSystems" : [ {
+      "description" : "Modelo de lenguaje (gpt-4o-mini) que genera las recomendaciones del chatbot.",
+      "documentation" : { },
+      "id" : "4",
+      "name" : "OpenAI API",
+      "properties" : {
+        "structurizr.dsl.identifier" : "openai"
+      },
+      "tags" : "Element,Software System,External"
+    }, {
+      "description" : "Canal de mensajería (api.telegram.org) para las notificaciones del equipo.",
+      "documentation" : { },
+      "id" : "5",
+      "name" : "Telegram Bot API",
+      "properties" : {
+        "structurizr.dsl.identifier" : "telegram"
+      },
+      "tags" : "Element,Software System,External"
+    }, {
+      "description" : "Gestor de incidencias (proyecto TASKBOT) donde se crean tickets de fallo automáticos.",
+      "documentation" : { },
+      "id" : "6",
+      "name" : "Jira",
+      "properties" : {
+        "structurizr.dsl.identifier" : "jira"
+      },
+      "tags" : "Element,Software System,External"
+    }, {
+      "description" : "GitHub Actions + GitHub Container Registry (ghcr.io/<org>/taskbot): construye y despliega el sistema.",
+      "documentation" : { },
+      "id" : "7",
+      "name" : "CI/CD Platform",
+      "properties" : {
+        "structurizr.dsl.identifier" : "cicd"
+      },
+      "relationships" : [ {
+        "description" : "Construye imágenes y despliega a OKE",
+        "destinationId" : "8",
+        "id" : "60",
+        "sourceId" : "7",
+        "tags" : "Relationship",
+        "technology" : "GitHub Actions"
+      } ],
+      "tags" : "Element,Software System,External"
+    }, {
+      "containers" : [ {
+        "description" : "Interfaz web del equipo: Login, Proyectos/Sprints, Task Manager, Kanban, Dashboard de KPIs y Chatbot.",
+        "documentation" : { },
+        "id" : "9",
+        "name" : "Single Page Application",
+        "properties" : {
+          "structurizr.dsl.identifier" : "taskbot.spa"
+        },
+        "relationships" : [ {
+          "description" : "Realiza llamadas a la API",
+          "destinationId" : "10",
+          "id" : "30",
+          "sourceId" : "9",
+          "tags" : "Relationship",
+          "technology" : "HTTPS/JSON"
+        } ],
+        "tags" : "Element,Container,WebApp",
+        "technology" : "React + Vite (servida por Nginx)"
+      }, {
+        "description" : "Punto de entrada único: enrutamiento por ruta, terminación TLS y balanceo hacia los microservicios.",
+        "documentation" : { },
+        "id" : "10",
+        "name" : "API Gateway",
+        "properties" : {
+          "structurizr.dsl.identifier" : "taskbot.ingress"
+        },
+        "relationships" : [ {
+          "description" : "Enruta /api/v1/auth, /swagger-auth",
+          "destinationId" : "11",
+          "id" : "31",
+          "sourceId" : "10",
+          "tags" : "Relationship",
+          "technology" : "HTTP"
+        }, {
+          "description" : "Enruta /api/tasks, /swagger-tasks",
+          "destinationId" : "13",
+          "id" : "32",
+          "sourceId" : "10",
+          "tags" : "Relationship",
+          "technology" : "HTTP"
+        }, {
+          "description" : "Enruta /api/tasks, /swagger-tasks",
+          "destinationId" : "12",
+          "id" : "33",
+          "linkedRelationshipId" : "32",
+          "sourceId" : "10",
+          "technology" : "HTTP"
+        }, {
+          "description" : "Enruta /api/sprints",
+          "destinationId" : "15",
+          "id" : "34",
+          "sourceId" : "10",
+          "tags" : "Relationship",
+          "technology" : "HTTP"
+        }, {
+          "description" : "Enruta /api, /swagger-ui (catch-all)",
+          "destinationId" : "20",
+          "id" : "35",
+          "sourceId" : "10",
+          "tags" : "Relationship",
+          "technology" : "HTTP"
+        }, {
+          "description" : "Enruta /api/ai, /swagger-ia",
+          "destinationId" : "21",
+          "id" : "36",
+          "sourceId" : "10",
+          "tags" : "Relationship",
+          "technology" : "HTTP"
+        }, {
+          "description" : "Enruta /api/webhook/telegram, /api/anuncios",
+          "destinationId" : "22",
+          "id" : "37",
+          "sourceId" : "10",
+          "tags" : "Relationship",
+          "technology" : "HTTP"
+        } ],
+        "tags" : "Element,Container,Gateway",
+        "technology" : "NGINX Ingress Controller"
+      }, {
+        "description" : "Autenticación con JWT, hash BCrypt, gestión de roles y de perfiles de usuario (Auth + User Management).",
+        "documentation" : { },
+        "id" : "11",
+        "name" : "auth-service",
+        "properties" : {
+          "structurizr.dsl.identifier" : "taskbot.authSvc"
+        },
+        "relationships" : [ {
+          "description" : "Lee/escribe usuarios y roles",
+          "destinationId" : "23",
+          "id" : "38",
+          "sourceId" : "11",
+          "tags" : "Relationship",
+          "technology" : "JDBC + Wallet"
+        } ],
+        "tags" : "Element,Container,Microservice",
+        "technology" : "Spring Boot · JAR · :8082"
+      }, {
+        "components" : [ {
+          "description" : "API REST de tareas (/api/tasks): crear, asignar, cambiar estado, registrar horas.",
+          "documentation" : { },
+          "id" : "13",
+          "name" : "TaskController",
+          "properties" : {
+            "structurizr.dsl.identifier" : "taskbot.taskSvc.taskController"
+          },
+          "relationships" : [ {
+            "description" : "Invoca la lógica de tareas",
+            "destinationId" : "14",
+            "id" : "47",
+            "sourceId" : "13",
+            "tags" : "Relationship"
+          } ],
+          "tags" : "Element,Component",
+          "technology" : "Spring MVC"
+        }, {
+          "description" : "Lógica de negocio de tareas (Task Management Component de Sprint 1).",
+          "documentation" : { },
+          "id" : "14",
+          "name" : "TaskService",
+          "properties" : {
+            "structurizr.dsl.identifier" : "taskbot.taskSvc.taskService"
+          },
+          "relationships" : [ {
+            "description" : "Lee/escribe tareas",
+            "destinationId" : "17",
+            "id" : "49",
+            "sourceId" : "14",
+            "tags" : "Relationship"
+          }, {
+            "description" : "Notifica tarea completada",
+            "destinationId" : "19",
+            "id" : "51",
+            "sourceId" : "14",
+            "tags" : "Relationship"
+          }, {
+            "description" : "Notifica tarea bloqueada",
+            "destinationId" : "22",
+            "id" : "54",
+            "sourceId" : "14",
+            "tags" : "Relationship",
+            "technology" : "REST"
+          } ],
+          "tags" : "Element,Component",
+          "technology" : "Spring Service"
+        }, {
+          "description" : "API REST de sprints y proyectos (/api/sprints).",
+          "documentation" : { },
+          "id" : "15",
+          "name" : "SprintController",
+          "properties" : {
+            "structurizr.dsl.identifier" : "taskbot.taskSvc.sprintController"
+          },
+          "relationships" : [ {
+            "description" : "Invoca la lógica de sprints",
+            "destinationId" : "16",
+            "id" : "48",
+            "sourceId" : "15",
+            "tags" : "Relationship"
+          } ],
+          "tags" : "Element,Component",
+          "technology" : "Spring MVC"
+        }, {
+          "description" : "Ciclo de vida de sprints: crear, iniciar, cerrar (Project & Sprint Component de Sprint 1).",
+          "documentation" : { },
+          "id" : "16",
+          "name" : "SprintService",
+          "properties" : {
+            "structurizr.dsl.identifier" : "taskbot.taskSvc.sprintService"
+          },
+          "relationships" : [ {
+            "description" : "Lee/escribe sprints y proyectos",
+            "destinationId" : "18",
+            "id" : "50",
+            "sourceId" : "16",
+            "tags" : "Relationship"
+          }, {
+            "description" : "Avisa de sprint próximo a vencer",
+            "destinationId" : "22",
+            "id" : "56",
+            "sourceId" : "16",
+            "tags" : "Relationship",
+            "technology" : "REST"
+          } ],
+          "tags" : "Element,Component",
+          "technology" : "Spring Service"
+        }, {
+          "description" : "Acceso a datos de tareas.",
+          "documentation" : { },
+          "id" : "17",
+          "name" : "TaskRepository",
+          "properties" : {
+            "structurizr.dsl.identifier" : "taskbot.taskSvc.taskRepo"
+          },
+          "relationships" : [ {
+            "description" : "Persiste tareas",
+            "destinationId" : "23",
+            "id" : "57",
+            "sourceId" : "17",
+            "tags" : "Relationship",
+            "technology" : "JDBC + Wallet"
+          } ],
+          "tags" : "Element,Component",
+          "technology" : "Spring Data JPA"
+        }, {
+          "description" : "Acceso a datos de proyectos y sprints.",
+          "documentation" : { },
+          "id" : "18",
+          "name" : "SprintRepository",
+          "properties" : {
+            "structurizr.dsl.identifier" : "taskbot.taskSvc.sprintRepo"
+          },
+          "relationships" : [ {
+            "description" : "Persiste sprints y proyectos",
+            "destinationId" : "23",
+            "id" : "59",
+            "sourceId" : "18",
+            "tags" : "Relationship",
+            "technology" : "JDBC + Wallet"
+          } ],
+          "tags" : "Element,Component",
+          "technology" : "Spring Data JPA"
+        }, {
+          "description" : "Cliente declarativo hacia kpi-service para disparar cálculos al completar tareas.",
+          "documentation" : { },
+          "id" : "19",
+          "name" : "KpiFeignClient",
+          "properties" : {
+            "structurizr.dsl.identifier" : "taskbot.taskSvc.kpiClient"
+          },
+          "relationships" : [ {
+            "description" : "Dispara cálculo de KPI",
+            "destinationId" : "20",
+            "id" : "52",
+            "sourceId" : "19",
+            "tags" : "Relationship",
+            "technology" : "REST (Feign)"
+          } ],
+          "tags" : "Element,Component",
+          "technology" : "Spring Cloud OpenFeign"
+        } ],
+        "description" : "Gestión de tareas, estados, horas y del ciclo de vida de proyectos y sprints (Task + Project & Sprint).",
+        "documentation" : { },
+        "id" : "12",
+        "name" : "task-service",
+        "properties" : {
+          "structurizr.dsl.identifier" : "taskbot.taskSvc"
+        },
+        "relationships" : [ {
+          "description" : "Dispara cálculo de KPI",
+          "destinationId" : "20",
+          "id" : "53",
+          "linkedRelationshipId" : "52",
+          "sourceId" : "12",
+          "technology" : "REST (Feign)"
+        }, {
+          "description" : "Notifica tarea bloqueada",
+          "destinationId" : "22",
+          "id" : "55",
+          "linkedRelationshipId" : "54",
+          "sourceId" : "12",
+          "technology" : "REST"
+        }, {
+          "description" : "Persiste tareas",
+          "destinationId" : "23",
+          "id" : "58",
+          "linkedRelationshipId" : "57",
+          "sourceId" : "12",
+          "technology" : "JDBC + Wallet"
+        } ],
+        "tags" : "Element,Container,Microservice",
+        "technology" : "Spring Boot · JAR · :8084"
+      }, {
+        "description" : "Cálculo de KPIs (horas por sprint, tareas por developer, velocidad), reportes y comparativas históricas.",
+        "documentation" : { },
+        "id" : "20",
+        "name" : "kpi-service",
+        "properties" : {
+          "structurizr.dsl.identifier" : "taskbot.kpiSvc"
+        },
+        "relationships" : [ {
+          "description" : "Lee datos operativos y persiste snapshots de KPI",
+          "destinationId" : "23",
+          "id" : "39",
+          "sourceId" : "20",
+          "tags" : "Relationship",
+          "technology" : "JDBC + Wallet"
+        } ],
+        "tags" : "Element,Container,Microservice",
+        "technology" : "Spring Boot · WAR · :8080"
+      }, {
+        "description" : "Chatbot: recibe consultas NLP, recupera contexto y llama a OpenAI para generar recomendaciones.",
+        "documentation" : { },
+        "id" : "21",
+        "name" : "ai-service",
+        "properties" : {
+          "structurizr.dsl.identifier" : "taskbot.aiSvc"
+        },
+        "relationships" : [ {
+          "description" : "Lee/escribe historial de conversaciones",
+          "destinationId" : "23",
+          "id" : "40",
+          "sourceId" : "21",
+          "tags" : "Relationship",
+          "technology" : "JDBC + Wallet"
+        }, {
+          "description" : "Obtiene contexto de tareas y sprints activos",
+          "destinationId" : "13",
+          "id" : "41",
+          "sourceId" : "21",
+          "tags" : "Relationship",
+          "technology" : "REST"
+        }, {
+          "description" : "Obtiene contexto de tareas y sprints activos",
+          "destinationId" : "12",
+          "id" : "42",
+          "linkedRelationshipId" : "41",
+          "sourceId" : "21",
+          "technology" : "REST"
+        }, {
+          "description" : "Envía el prompt con el contexto del proyecto",
+          "destinationId" : "4",
+          "id" : "43",
+          "sourceId" : "21",
+          "tags" : "Relationship",
+          "technology" : "HTTPS (completions)"
+        } ],
+        "tags" : "Element,Container,Microservice",
+        "technology" : "Spring Boot · JAR · :8083"
+      }, {
+        "description" : "Notificaciones: detecta eventos críticos y envía alertas al canal de Telegram.",
+        "documentation" : { },
+        "id" : "22",
+        "name" : "telegram-service",
+        "properties" : {
+          "structurizr.dsl.identifier" : "taskbot.telegramSvc"
+        },
+        "relationships" : [ {
+          "description" : "Envía mensajes al canal del equipo",
+          "destinationId" : "5",
+          "id" : "45",
+          "sourceId" : "22",
+          "tags" : "Relationship",
+          "technology" : "HTTPS (sendMessage)"
+        } ],
+        "tags" : "Element,Container,Microservice",
+        "technology" : "Spring Boot · JAR · :8081"
+      }, {
+        "description" : "Persistencia compartida del sistema: usuarios, proyectos, sprints, tareas, KPIs e historial de chat.",
+        "documentation" : { },
+        "id" : "23",
+        "name" : "Oracle Autonomous DB",
+        "properties" : {
+          "structurizr.dsl.identifier" : "taskbot.db"
+        },
+        "tags" : "Element,Container,Database",
+        "technology" : "Oracle ATP · gestiondetareasbd_tp · wallet en /app/Wallet"
+      } ],
+      "description" : "Plataforma de gestión de tareas tipo Scrum: planeación de sprints, tablero Kanban, KPIs y chatbot de IA.",
+      "documentation" : { },
+      "id" : "8",
+      "name" : "TaskBot",
+      "properties" : {
+        "structurizr.dsl.identifier" : "taskbot"
+      },
+      "relationships" : [ {
+        "description" : "Envía el prompt con el contexto del proyecto",
+        "destinationId" : "4",
+        "id" : "44",
+        "linkedRelationshipId" : "43",
+        "sourceId" : "8",
+        "technology" : "HTTPS (completions)"
+      }, {
+        "description" : "Envía mensajes al canal del equipo",
+        "destinationId" : "5",
+        "id" : "46",
+        "linkedRelationshipId" : "45",
+        "sourceId" : "8",
+        "technology" : "HTTPS (sendMessage)"
+      }, {
+        "description" : "Crea tickets Bug ante fallos de despliegue",
+        "destinationId" : "6",
+        "id" : "61",
+        "sourceId" : "8",
+        "tags" : "Relationship",
+        "technology" : "REST API"
+      } ],
+      "tags" : "Element,Software System"
+    } ]
+  },
+  "name" : "TaskBot",
+  "properties" : {
+    "structurizr.inspection.error" : "15",
+    "structurizr.inspection.info" : "0",
+    "structurizr.inspection.ignore" : "0",
+    "structurizr.inspection.warning" : "0"
+  },
+  "views" : {
+    "componentViews" : [ {
+      "automaticLayout" : {
+        "edgeSeparation" : 50,
+        "nodeSeparation" : 50,
+        "rankDirection" : "LeftRight",
+        "rankSeparation" : 100,
+        "vertices" : true
+      },
+      "containerId" : "12",
+      "description" : "Componentes del task-service (Task Management + Project & Sprint).",
+      "elements" : [ {
+        "id" : "10",
+        "x" : 0,
+        "y" : 0
+      }, {
+        "id" : "13",
+        "x" : 0,
+        "y" : 0
+      }, {
+        "id" : "14",
+        "x" : 0,
+        "y" : 0
+      }, {
+        "id" : "15",
+        "x" : 0,
+        "y" : 0
+      }, {
+        "id" : "16",
+        "x" : 0,
+        "y" : 0
+      }, {
+        "id" : "17",
+        "x" : 0,
+        "y" : 0
+      }, {
+        "id" : "18",
+        "x" : 0,
+        "y" : 0
+      }, {
+        "id" : "19",
+        "x" : 0,
+        "y" : 0
+      }, {
+        "id" : "20",
+        "x" : 0,
+        "y" : 0
+      }, {
+        "id" : "21",
+        "x" : 0,
+        "y" : 0
+      }, {
+        "id" : "22",
+        "x" : 0,
+        "y" : 0
+      }, {
+        "id" : "23",
+        "x" : 0,
+        "y" : 0
+      } ],
+      "externalContainerBoundariesVisible" : false,
+      "key" : "Components",
+      "name" : "Component View: TaskBot - task-service",
+      "order" : 4,
+      "relationships" : [ {
+        "id" : "32"
+      }, {
+        "id" : "34"
+      }, {
+        "id" : "35"
+      }, {
+        "id" : "36"
+      }, {
+        "id" : "37"
+      }, {
+        "id" : "39"
+      }, {
+        "id" : "40"
+      }, {
+        "id" : "41"
+      }, {
+        "id" : "47"
+      }, {
+        "id" : "48"
+      }, {
+        "id" : "49"
+      }, {
+        "id" : "50"
+      }, {
+        "id" : "51"
+      }, {
+        "id" : "52"
+      }, {
+        "id" : "54"
+      }, {
+        "id" : "56"
+      }, {
+        "id" : "57"
+      }, {
+        "id" : "59"
+      } ]
+    } ],
+    "configuration" : {
+      "styles" : {
+        "elements" : [ {
+          "background" : "#08427b",
+          "color" : "#ffffff",
+          "shape" : "Person",
+          "tag" : "Actor"
+        }, {
+          "background" : "#85bbf0",
+          "color" : "#000000",
+          "tag" : "Component"
+        }, {
+          "background" : "#438dd5",
+          "color" : "#ffffff",
+          "tag" : "Container"
+        }, {
+          "background" : "#f5a623",
+          "color" : "#000000",
+          "shape" : "Cylinder",
+          "tag" : "Database"
+        }, {
+          "background" : "#999999",
+          "color" : "#ffffff",
+          "tag" : "External"
+        }, {
+          "background" : "#85bbf0",
+          "color" : "#000000",
+          "shape" : "Hexagon",
+          "tag" : "Gateway"
+        }, {
+          "background" : "#ffffff",
+          "color" : "#000000",
+          "tag" : "Infrastructure Node"
+        }, {
+          "background" : "#438dd5",
+          "color" : "#ffffff",
+          "shape" : "RoundedBox",
+          "tag" : "Microservice"
+        }, {
+          "background" : "#1168bd",
+          "color" : "#ffffff",
+          "tag" : "Software System"
+        }, {
+          "background" : "#438dd5",
+          "color" : "#ffffff",
+          "shape" : "WebBrowser",
+          "tag" : "WebApp"
+        } ]
+      },
+      "terminology" : { }
+    },
+    "containerViews" : [ {
+      "automaticLayout" : {
+        "edgeSeparation" : 50,
+        "nodeSeparation" : 50,
+        "rankDirection" : "LeftRight",
+        "rankSeparation" : 100,
+        "vertices" : true
+      },
+      "description" : "Contenedores internos de TaskBot.",
+      "elements" : [ {
+        "id" : "1",
+        "x" : 0,
+        "y" : 0
+      }, {
+        "id" : "2",
+        "x" : 0,
+        "y" : 0
+      }, {
+        "id" : "3",
+        "x" : 0,
+        "y" : 0
+      }, {
+        "id" : "4",
+        "x" : 0,
+        "y" : 0
+      }, {
+        "id" : "5",
+        "x" : 0,
+        "y" : 0
+      }, {
+        "id" : "9",
+        "x" : 0,
+        "y" : 0
+      }, {
+        "id" : "10",
+        "x" : 0,
+        "y" : 0
+      }, {
+        "id" : "11",
+        "x" : 0,
+        "y" : 0
+      }, {
+        "id" : "12",
+        "x" : 0,
+        "y" : 0
+      }, {
+        "id" : "20",
+        "x" : 0,
+        "y" : 0
+      }, {
+        "id" : "21",
+        "x" : 0,
+        "y" : 0
+      }, {
+        "id" : "22",
+        "x" : 0,
+        "y" : 0
+      }, {
+        "id" : "23",
+        "x" : 0,
+        "y" : 0
+      } ],
+      "externalSoftwareSystemBoundariesVisible" : false,
+      "key" : "Containers",
+      "name" : "Container View: TaskBot",
+      "order" : 3,
+      "relationships" : [ {
+        "id" : "24"
+      }, {
+        "id" : "26"
+      }, {
+        "id" : "28"
+      }, {
+        "id" : "30"
+      }, {
+        "id" : "31"
+      }, {
+        "id" : "33"
+      }, {
+        "id" : "35"
+      }, {
+        "id" : "36"
+      }, {
+        "id" : "37"
+      }, {
+        "id" : "38"
+      }, {
+        "id" : "39"
+      }, {
+        "id" : "40"
+      }, {
+        "id" : "42"
+      }, {
+        "id" : "43"
+      }, {
+        "id" : "45"
+      }, {
+        "id" : "53"
+      }, {
+        "id" : "55"
+      }, {
+        "id" : "58"
+      } ],
+      "softwareSystemId" : "8"
+    } ],
+    "deploymentViews" : [ {
+      "automaticLayout" : {
+        "edgeSeparation" : 50,
+        "nodeSeparation" : 50,
+        "rankDirection" : "LeftRight",
+        "rankSeparation" : 100,
+        "vertices" : true
+      },
+      "description" : "Despliegue en OCI/OKE (namespace activo vs-blue) + CI/CD.",
+      "elements" : [ {
+        "id" : "62",
+        "x" : 0,
+        "y" : 0
+      }, {
+        "id" : "63",
+        "x" : 0,
+        "y" : 0
+      }, {
+        "id" : "64",
+        "x" : 0,
+        "y" : 0
+      }, {
+        "id" : "65",
+        "x" : 0,
+        "y" : 0
+      }, {
+        "id" : "66",
+        "x" : 0,
+        "y" : 0
+      }, {
+        "id" : "67",
+        "x" : 0,
+        "y" : 0
+      }, {
+        "id" : "68",
+        "x" : 0,
+        "y" : 0
+      }, {
+        "id" : "69",
+        "x" : 0,
+        "y" : 0
+      }, {
+        "id" : "70",
+        "x" : 0,
+        "y" : 0
+      }, {
+        "id" : "71",
+        "x" : 0,
+        "y" : 0
+      }, {
+        "id" : "72",
+        "x" : 0,
+        "y" : 0
+      }, {
+        "id" : "74",
+        "x" : 0,
+        "y" : 0
+      }, {
+        "id" : "75",
+        "x" : 0,
+        "y" : 0
+      }, {
+        "id" : "77",
+        "x" : 0,
+        "y" : 0
+      }, {
+        "id" : "78",
+        "x" : 0,
+        "y" : 0
+      }, {
+        "id" : "80",
+        "x" : 0,
+        "y" : 0
+      }, {
+        "id" : "81",
+        "x" : 0,
+        "y" : 0
+      }, {
+        "id" : "84",
+        "x" : 0,
+        "y" : 0
+      }, {
+        "id" : "85",
+        "x" : 0,
+        "y" : 0
+      }, {
+        "id" : "88",
+        "x" : 0,
+        "y" : 0
+      }, {
+        "id" : "89",
+        "x" : 0,
+        "y" : 0
+      }, {
+        "id" : "92",
+        "x" : 0,
+        "y" : 0
+      }, {
+        "id" : "93",
+        "x" : 0,
+        "y" : 0
+      }, {
+        "id" : "94",
+        "x" : 0,
+        "y" : 0
+      }, {
+        "id" : "99",
+        "x" : 0,
+        "y" : 0
+      }, {
+        "id" : "100",
+        "x" : 0,
+        "y" : 0
+      }, {
+        "id" : "101",
+        "x" : 0,
+        "y" : 0
+      }, {
+        "id" : "102",
+        "x" : 0,
+        "y" : 0
+      }, {
+        "id" : "104",
+        "x" : 0,
+        "y" : 0
+      }, {
+        "id" : "105",
+        "x" : 0,
+        "y" : 0
+      }, {
+        "id" : "107",
+        "x" : 0,
+        "y" : 0
+      }, {
+        "id" : "108",
+        "x" : 0,
+        "y" : 0
+      } ],
+      "environment" : "Production",
+      "key" : "Deployment",
+      "name" : "Deployment View: TaskBot - Production",
+      "order" : 5,
+      "relationships" : [ {
+        "id" : "103"
+      }, {
+        "id" : "106"
+      }, {
+        "id" : "109"
+      }, {
+        "id" : "110"
+      }, {
+        "id" : "111"
+      }, {
+        "id" : "73"
+      }, {
+        "id" : "76"
+      }, {
+        "id" : "79"
+      }, {
+        "id" : "82"
+      }, {
+        "id" : "83"
+      }, {
+        "id" : "86"
+      }, {
+        "id" : "87"
+      }, {
+        "id" : "90"
+      }, {
+        "id" : "91"
+      }, {
+        "id" : "95"
+      }, {
+        "id" : "96"
+      }, {
+        "id" : "97"
+      }, {
+        "id" : "98"
+      } ],
+      "softwareSystemId" : "8"
+    } ],
+    "dynamicViews" : [ {
+      "automaticLayout" : {
+        "edgeSeparation" : 50,
+        "nodeSeparation" : 50,
+        "rankDirection" : "LeftRight",
+        "rankSeparation" : 100,
+        "vertices" : true
+      },
+      "description" : "Caso de uso: recomendación del chatbot de IA.",
+      "elementId" : "8",
+      "elements" : [ {
+        "id" : "3",
+        "x" : 0,
+        "y" : 0
+      }, {
+        "id" : "4",
+        "x" : 0,
+        "y" : 0
+      }, {
+        "id" : "9",
+        "x" : 0,
+        "y" : 0
+      }, {
+        "id" : "10",
+        "x" : 0,
+        "y" : 0
+      }, {
+        "id" : "12",
+        "x" : 0,
+        "y" : 0
+      }, {
+        "id" : "21",
+        "x" : 0,
+        "y" : 0
+      } ],
+      "externalBoundariesVisible" : false,
+      "key" : "uc01_chatbot",
+      "name" : "Dynamic View: TaskBot",
+      "order" : 6,
+      "relationships" : [ {
+        "description" : "Escribe una consulta en lenguaje natural",
+        "id" : "24",
+        "order" : "1",
+        "response" : false
+      }, {
+        "description" : "POST /api/ai/chat",
+        "id" : "30",
+        "order" : "2",
+        "response" : false
+      }, {
+        "description" : "Enruta la consulta al chatbot",
+        "id" : "36",
+        "order" : "3",
+        "response" : false
+      }, {
+        "description" : "Obtiene contexto de tareas y sprints activos",
+        "id" : "42",
+        "order" : "4",
+        "response" : false
+      }, {
+        "description" : "Envía el prompt con el contexto del proyecto",
+        "id" : "43",
+        "order" : "5",
+        "response" : false
+      } ]
+    }, {
+      "automaticLayout" : {
+        "edgeSeparation" : 50,
+        "nodeSeparation" : 50,
+        "rankDirection" : "LeftRight",
+        "rankSeparation" : 100,
+        "vertices" : true
+      },
+      "description" : "Caso de uso: tarea bloqueada -> notificación a Telegram.",
+      "elementId" : "8",
+      "elements" : [ {
+        "id" : "3",
+        "x" : 0,
+        "y" : 0
+      }, {
+        "id" : "5",
+        "x" : 0,
+        "y" : 0
+      }, {
+        "id" : "9",
+        "x" : 0,
+        "y" : 0
+      }, {
+        "id" : "10",
+        "x" : 0,
+        "y" : 0
+      }, {
+        "id" : "12",
+        "x" : 0,
+        "y" : 0
+      }, {
+        "id" : "22",
+        "x" : 0,
+        "y" : 0
+      } ],
+      "externalBoundariesVisible" : false,
+      "key" : "uc02_blocked_task",
+      "name" : "Dynamic View: TaskBot",
+      "order" : 7,
+      "relationships" : [ {
+        "description" : "Cambia el estado de una tarea a Blocked",
+        "id" : "24",
+        "order" : "1",
+        "response" : false
+      }, {
+        "description" : "PUT /api/tasks/{id}/status",
+        "id" : "30",
+        "order" : "2",
+        "response" : false
+      }, {
+        "description" : "Actualiza el estado de la tarea",
+        "id" : "33",
+        "order" : "3",
+        "response" : false
+      }, {
+        "description" : "Notifica la tarea bloqueada",
+        "id" : "55",
+        "order" : "4",
+        "response" : false
+      }, {
+        "description" : "Envía el mensaje al canal del equipo",
+        "id" : "45",
+        "order" : "5",
+        "response" : false
+      } ]
+    } ],
+    "systemContextViews" : [ {
+      "automaticLayout" : {
+        "edgeSeparation" : 50,
+        "nodeSeparation" : 50,
+        "rankDirection" : "LeftRight",
+        "rankSeparation" : 100,
+        "vertices" : true
+      },
+      "description" : "Contexto: actores y sistemas externos alrededor de TaskBot.",
+      "elements" : [ {
+        "id" : "1",
+        "x" : 0,
+        "y" : 0
+      }, {
+        "id" : "2",
+        "x" : 0,
+        "y" : 0
+      }, {
+        "id" : "3",
+        "x" : 0,
+        "y" : 0
+      }, {
+        "id" : "4",
+        "x" : 0,
+        "y" : 0
+      }, {
+        "id" : "5",
+        "x" : 0,
+        "y" : 0
+      }, {
+        "id" : "6",
+        "x" : 0,
+        "y" : 0
+      }, {
+        "id" : "7",
+        "x" : 0,
+        "y" : 0
+      }, {
+        "id" : "8",
+        "x" : 0,
+        "y" : 0
+      } ],
+      "enterpriseBoundaryVisible" : true,
+      "key" : "Context",
+      "name" : "System Context View: TaskBot",
+      "order" : 2,
+      "relationships" : [ {
+        "id" : "25"
+      }, {
+        "id" : "27"
+      }, {
+        "id" : "29"
+      }, {
+        "id" : "44"
+      }, {
+        "id" : "46"
+      }, {
+        "id" : "60"
+      }, {
+        "id" : "61"
+      } ],
+      "softwareSystemId" : "8"
+    } ],
+    "systemLandscapeViews" : [ {
+      "automaticLayout" : {
+        "edgeSeparation" : 50,
+        "nodeSeparation" : 50,
+        "rankDirection" : "LeftRight",
+        "rankSeparation" : 100,
+        "vertices" : true
+      },
+      "description" : "Panorama de TaskBot en su ecosistema.",
+      "elements" : [ {
+        "id" : "1",
+        "x" : 0,
+        "y" : 0
+      }, {
+        "id" : "2",
+        "x" : 0,
+        "y" : 0
+      }, {
+        "id" : "3",
+        "x" : 0,
+        "y" : 0
+      }, {
+        "id" : "4",
+        "x" : 0,
+        "y" : 0
+      }, {
+        "id" : "5",
+        "x" : 0,
+        "y" : 0
+      }, {
+        "id" : "6",
+        "x" : 0,
+        "y" : 0
+      }, {
+        "id" : "7",
+        "x" : 0,
+        "y" : 0
+      }, {
+        "id" : "8",
+        "x" : 0,
+        "y" : 0
+      } ],
+      "enterpriseBoundaryVisible" : true,
+      "key" : "Landscape",
+      "name" : "System Landscape View",
+      "order" : 1,
+      "relationships" : [ {
+        "id" : "25"
+      }, {
+        "id" : "27"
+      }, {
+        "id" : "29"
+      }, {
+        "id" : "44"
+      }, {
+        "id" : "46"
+      }, {
+        "id" : "60"
+      }, {
+        "id" : "61"
+      } ]
+    } ]
+  }
+}
