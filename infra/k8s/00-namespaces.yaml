@@ -1,0 +1,17 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: vs-blue
+  labels:
+    project: taskbot
+    environment: prod
+    color: blue
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: vs-green
+  labels:
+    project: taskbot
+    environment: prod
+    color: green

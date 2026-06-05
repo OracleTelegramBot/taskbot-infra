@@ -1,0 +1,27 @@
+# =========================================================
+# ConfigMap con los identificadores de Object Storage
+# que necesita el initContainer "download-wallet" de los
+# 5 microservicios. NO contiene secretos — solo coordenadas.
+#
+# Único punto de cambio si algún día el namespace, bucket
+# o nombre del archivo del wallet cambian.
+# =========================================================
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: oci-config
+  namespace: vs-blue
+data:
+  OS_NAMESPACE: "ax5o32ww5jyq"
+  WALLET_BUCKET: "taskbot-wallet"
+  WALLET_OBJECT: "Wallet_gestiondetareasbd_tp.zip"
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: oci-config
+  namespace: vs-green
+data:
+  OS_NAMESPACE: "ax5o32ww5jyq"
+  WALLET_BUCKET: "taskbot-wallet"
+  WALLET_OBJECT: "Wallet_gestiondetareasbd_tp.zip"

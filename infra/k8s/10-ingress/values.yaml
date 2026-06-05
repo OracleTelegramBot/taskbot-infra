@@ -1,0 +1,40 @@
+# Configuración del NGINX Ingress Controller para OCI OKE.
+#
+# Cuando Helm crea el Service tipo LoadBalancer, OCI lee las
+# annotations y provisiona un Load Balancer público en la subnet
+# que configuramos en el cluster (oci_core_subnet.public).
+
+controller:
+  replicaCount: 2  # alta disponibilidad: un pod por nodo
+
+  service:
+    type: LoadBalancer
+    annotations:
+      # Shape flexible: ancho de banda elástico entre min y max Mbps.
+      # 10-100 Mbps cubre con holgura el tráfico esperado.
+      service.beta.kubernetes.io/oci-load-balancer-shape: "flexible"
+      service.beta.kubernetes.io/oci-load-balancer-shape-flex-min: "10"
+      service.beta.kubernetes.io/oci-load-balancer-shape-flex-max: "100"
+
+  # Necesario para que los Ingress reciban el .status.loadBalancer.ingress
+  # correcto, lo cual a su vez es requisito para que cert-manager funcione
+  # con challenges HTTP-01.
+  publishService:
+    enabled: true
+
+  # Probes razonables para que K8s descarte pods muertos rápido
+  livenessProbe:
+    initialDelaySeconds: 10
+    periodSeconds: 10
+  readinessProbe:
+    initialDelaySeconds: 5
+    periodSeconds: 10
+
+  # Recursos modestos pero suficientes
+  resources:
+    requests:
+      cpu: 100m
+      memory: 128Mi
+    limits:
+      cpu: 500m
+      memory: 512Mi

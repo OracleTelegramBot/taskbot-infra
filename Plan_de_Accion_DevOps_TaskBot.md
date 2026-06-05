@@ -55,7 +55,7 @@ git push → GitHub Repository
 | Imagen base Java | `eclipse-temurin:17-jre-alpine` |
 | Réplicas por microservicio | 2 |
 | Ingress Controller | NGINX |
-| Base de datos | Oracle Autonomous Database (ATP) — `botbd_tp` |
+| Base de datos | Oracle Autonomous Database (ATP) — `gestiondetareasbd_tp` |
 | Inteligencia Artificial | OpenAI API — `gpt-4o-mini` |
 | Mensajería | Telegram Bot API |
 | Observabilidad | OCI Logging, Monitoring, Notifications, Functions |
@@ -121,7 +121,7 @@ Se crean los siguientes recursos para soportar el monitoreo del sistema:
 
 ### Conectividad con la base de datos
 
-La Autonomous Database `botbd_tp` es un recurso preexistente. Terraform la referencia por su OCID y configura las reglas de seguridad necesarias para que los nodos OKE de la subnet privada puedan conectarse a ella.
+La Autonomous Database `gestiondetareasbd_tp` es un recurso preexistente. Terraform la referencia por su OCID y configura las reglas de seguridad necesarias para que los nodos OKE de la subnet privada puedan conectarse a ella.
 
 ---
 
@@ -439,7 +439,7 @@ El trabajo se distribuye por capas horizontales de la arquitectura. Cada integra
 - [ ] Compartment, grupos IAM y políticas
 - [ ] VCN, subnets, Internet Gateway, NAT Gateway
 - [ ] Vault con todos los secretos cargados
-- [ ] Conexión a la Autonomous DB `botbd_tp`
+- [ ] Conexión a la Autonomous DB `gestiondetareasbd_tp`
 - [ ] Load Balancers (producción y pruebas)
 - [ ] Log Groups y Notification Topics
 - [ ] OCI Functions Application

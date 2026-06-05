@@ -1,0 +1,123 @@
+# =========================================================
+# auth-service — Deployment en vs-green
+# Template canónico para los microservicios con DB.
+# Los otros 4 servicios son clones casi idénticos.
+# =========================================================
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: auth-service
+  namespace: vs-green
+  labels:
+    app: auth-service
+    color: green
+    project: taskbot
+spec:
+  replicas: 2
+  revisionHistoryLimit: 3
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+  selector:
+    matchLabels:
+      app: auth-service
+      color: green
+  template:
+    metadata:
+      labels:
+        app: auth-service
+        color: green
+        project: taskbot
+    spec:
+      imagePullSecrets:
+        - name: ghcr-pull-secret
+      initContainers:
+        - name: download-wallet
+          image: ghcr.io/oracle/oci-cli:latest
+          imagePullPolicy: IfNotPresent
+          command: ["/bin/sh", "-c"]
+          args:
+            - |
+              set -euo pipefail
+              echo "[init] Descargando wallet desde Object Storage..."
+              oci os object get \
+                --auth instance_principal \
+                --namespace-name "$OS_NAMESPACE" \
+                --bucket-name "$WALLET_BUCKET" \
+                --name "$WALLET_OBJECT" \
+                --file /tmp/wallet.zip
+              echo "[init] Descomprimiendo wallet en /wallet/..."
+              python3 -m zipfile -e /tmp/wallet.zip /wallet/
+              rm /tmp/wallet.zip
+              ls -la /wallet/
+          envFrom:
+            - configMapRef:
+                name: oci-config
+          volumeMounts:
+            - name: wallet
+              mountPath: /wallet
+          resources:
+            requests: { cpu: 50m, memory: 128Mi }
+            limits:   { cpu: 200m, memory: 256Mi }
+      containers:
+        - name: auth-service
+          image: ghcr.io/oracletelegrambot/taskbot-auth-service:IMAGE_TAG
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 8082
+              protocol: TCP
+          envFrom:
+            - secretRef:
+                name: taskbot-secrets
+          env:
+            - name: SPRING_PROFILES_ACTIVE
+              value: "prod"
+            - name: TNS_ADMIN
+              value: "/app/Wallet"
+            - name: SPRING_DATASOURCE_URL
+              value: "jdbc:oracle:thin:@gestiondetareasbd_tp?TNS_ADMIN=/app/Wallet"
+            - name: SPRING_DATASOURCE_USERNAME
+              valueFrom:
+                secretKeyRef:
+                  name: taskbot-secrets
+                  key: DB_ADMIN_USERNAME
+            - name: SPRING_DATASOURCE_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: taskbot-secrets
+                  key: DB_ADMIN_PASSWORD
+            - name: POD_NAME
+              valueFrom: { fieldRef: { fieldPath: metadata.name } }
+            - name: POD_NAMESPACE
+              valueFrom: { fieldRef: { fieldPath: metadata.namespace } }
+          volumeMounts:
+            - name: wallet
+              mountPath: /app/Wallet
+              readOnly: true
+          resources:
+            requests: { cpu: 200m, memory: 512Mi }
+            limits:   { cpu: 1000m, memory: 1Gi }
+          livenessProbe:
+            httpGet: { path: /actuator/health/liveness, port: 8082 }
+            initialDelaySeconds: 60
+            periodSeconds: 30
+            timeoutSeconds: 5
+            failureThreshold: 3
+          readinessProbe:
+            httpGet: { path: /actuator/health/readiness, port: 8082 }
+            initialDelaySeconds: 30
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 3
+          startupProbe:
+            httpGet: { path: /actuator/health/liveness, port: 8082 }
+            initialDelaySeconds: 20
+            periodSeconds: 5
+            timeoutSeconds: 3
+            failureThreshold: 30
+      volumes:
+        - name: wallet
+          emptyDir: {}

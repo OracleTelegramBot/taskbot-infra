@@ -1,0 +1,92 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: telegram-service
+  namespace: vs-blue
+  labels:
+    app: telegram-service
+    color: blue
+    project: taskbot
+spec:
+  replicas: 2
+  revisionHistoryLimit: 3
+  strategy:
+    type: RollingUpdate
+    rollingUpdate: { maxSurge: 1, maxUnavailable: 0 }
+  selector:
+    matchLabels: { app: telegram-service, color: blue }
+  template:
+    metadata:
+      labels: { app: telegram-service, color: blue, project: taskbot }
+    spec:
+      imagePullSecrets:
+        - name: ghcr-pull-secret
+      initContainers:
+        - name: download-wallet
+          image: ghcr.io/oracle/oci-cli:latest
+          imagePullPolicy: IfNotPresent
+          command: ["/bin/sh", "-c"]
+          args:
+            - |
+              set -euo pipefail
+              oci os object get --auth instance_principal \
+                --namespace-name "$OS_NAMESPACE" \
+                --bucket-name "$WALLET_BUCKET" \
+                --name "$WALLET_OBJECT" \
+                --file /tmp/wallet.zip
+              python3 -m zipfile -e /tmp/wallet.zip /wallet/
+              rm /tmp/wallet.zip
+          envFrom:
+            - configMapRef: { name: oci-config }
+          volumeMounts:
+            - { name: wallet, mountPath: /wallet }
+          resources:
+            requests: { cpu: 50m, memory: 128Mi }
+            limits:   { cpu: 200m, memory: 256Mi }
+      containers:
+        - name: telegram-service
+          image: ghcr.io/oracletelegrambot/taskbot-telegram-service:IMAGE_TAG
+          imagePullPolicy: IfNotPresent
+          ports:
+            - { name: http, containerPort: 8081, protocol: TCP }
+          envFrom:
+            - secretRef: { name: taskbot-secrets }
+          env:
+            - { name: SPRING_PROFILES_ACTIVE, value: "prod" }
+            - { name: TNS_ADMIN, value: "/app/Wallet" }
+            - { name: SPRING_DATASOURCE_URL, value: "jdbc:oracle:thin:@gestiondetareasbd_tp?TNS_ADMIN=/app/Wallet" }
+            - name: SPRING_DATASOURCE_USERNAME
+              valueFrom: { secretKeyRef: { name: taskbot-secrets, key: DB_ADMIN_USERNAME } }
+            - name: SPRING_DATASOURCE_PASSWORD
+              valueFrom: { secretKeyRef: { name: taskbot-secrets, key: DB_ADMIN_PASSWORD } }
+            # Tip a tu app: usar long-polling. Si tu código lee esta var, le
+            # dice que NO arme un webhook. Si no la lee, no hace daño.
+            - { name: TELEGRAM_MODE, value: "polling" }
+            - { name: POD_NAME, valueFrom: { fieldRef: { fieldPath: metadata.name } } }
+            - { name: POD_NAMESPACE, valueFrom: { fieldRef: { fieldPath: metadata.namespace } } }
+          volumeMounts:
+            - { name: wallet, mountPath: /app/Wallet, readOnly: true }
+          resources:
+            requests: { cpu: 200m, memory: 512Mi }
+            limits:   { cpu: 1000m, memory: 1Gi }
+          livenessProbe:
+            httpGet: { path: /actuator/health/liveness, port: 8081 }
+            initialDelaySeconds: 60
+            periodSeconds: 30
+            timeoutSeconds: 5
+            failureThreshold: 3
+          readinessProbe:
+            httpGet: { path: /actuator/health/readiness, port: 8081 }
+            initialDelaySeconds: 30
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 3
+          startupProbe:
+            httpGet: { path: /actuator/health/liveness, port: 8081 }
+            initialDelaySeconds: 20
+            periodSeconds: 5
+            timeoutSeconds: 3
+            failureThreshold: 30
+      volumes:
+        - name: wallet
+          emptyDir: {}

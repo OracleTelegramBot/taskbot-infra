@@ -1,0 +1,29 @@
+# Terraform state — contiene OCIDs, IPs y otra info sensible
+*.tfstate
+*.tfstate.*
+*.tfstate.backup
+*.tfvars
+*.tfvars.json
+*.tfstate
+*.tfstate.*
+.terraform/
+.terraform.lock.hcl
+
+# Directorio de plugins y cache local
+.terraform/
+.terraform.lock.hcl
+
+# Variables del proyecto (cambia si decides que sí va al repo)
+terraform.tfvars
+*.auto.tfvars
+
+# Plan files
+*.tfplan
+
+# Crash logs
+crash.log
+crash.*.log
+
+# OCI key files si por error los pones aquí
+*.pem
+*.secrets
