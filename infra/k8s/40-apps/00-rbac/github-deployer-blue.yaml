@@ -1,0 +1,68 @@
+# =========================================================
+# RBAC para GitHub Actions — namespace vs-blue
+# Crea un ServiceAccount con permisos acotados para que el workflow
+# pueda desplegar/actualizar/eliminar recursos SOLO en este namespace.
+# El Secret tipo service-account-token genera un JWT durable que
+# usamos en el kubeconfig.
+#
+# Principle of least privilege:
+#   - secrets: solo read (ESO los gestiona, no queremos que el workflow los toque)
+#   - lo demás: full CRUD sobre los recursos que la app necesita
+# =========================================================
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: github-deployer
+  namespace: vs-blue
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: github-deployer
+  namespace: vs-blue
+rules:
+  # Deployments y todo lo relacionado con rolling updates
+  - apiGroups: ["apps"]
+    resources: ["deployments", "deployments/scale", "deployments/status", "replicasets"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  # Services, ConfigMaps, Pods (lectura para rollout status), eventos
+  - apiGroups: [""]
+    resources: ["services", "configmaps"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: [""]
+    resources: ["pods", "pods/log", "events"]
+    verbs: ["get", "list", "watch"]
+  # Secrets: SOLO READ. Los gestiona ESO desde OCI Vault, el workflow no debe tocarlos.
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["get", "list"]
+  # Ingress (para el switch blue/green)
+  - apiGroups: ["networking.k8s.io"]
+    resources: ["ingresses"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: github-deployer
+  namespace: vs-blue
+subjects:
+  - kind: ServiceAccount
+    name: github-deployer
+    namespace: vs-blue
+roleRef:
+  kind: Role
+  name: github-deployer
+  apiGroup: rbac.authorization.k8s.io
+---
+# K8s 1.24+ ya no genera tokens automáticamente para los SA.
+# Este Secret de tipo "service-account-token" fuerza la creación de un
+# token JWT durable que vamos a empotrar en el kubeconfig.
+apiVersion: v1
+kind: Secret
+metadata:
+  name: github-deployer-token
+  namespace: vs-blue
+  annotations:
+    kubernetes.io/service-account.name: github-deployer
+type: kubernetes.io/service-account-token

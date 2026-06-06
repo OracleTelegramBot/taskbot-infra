@@ -1,0 +1,23 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: frontend
+  namespace: vs-blue
+  labels: { app: frontend, color: blue }
+spec:
+  type: ClusterIP
+  selector: { app: frontend, color: blue }
+  ports:
+    - { name: http, port: 80, targetPort: 80, protocol: TCP }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: frontend
+  namespace: vs-green
+  labels: { app: frontend, color: green }
+spec:
+  type: ClusterIP
+  selector: { app: frontend, color: green }
+  ports:
+    - { name: http, port: 80, targetPort: 80, protocol: TCP }

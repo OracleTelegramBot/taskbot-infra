@@ -1,0 +1,23 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: task-service
+  namespace: vs-blue
+  labels: { app: task-service, color: blue }
+spec:
+  type: ClusterIP
+  selector: { app: task-service, color: blue }
+  ports:
+    - { name: http, port: 8084, targetPort: 8084, protocol: TCP }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: task-service
+  namespace: vs-green
+  labels: { app: task-service, color: green }
+spec:
+  type: ClusterIP
+  selector: { app: task-service, color: green }
+  ports:
+    - { name: http, port: 8084, targetPort: 8084, protocol: TCP }

@@ -1,0 +1,166 @@
+# =========================================================
+# Deploy Blue/Green a OKE.
+# Trigger: manual desde GitHub UI (workflow_dispatch).
+# 
+# Inputs:
+#   - image_tag: tag de las imágenes a deployar (e.g. develop, latest, SHA)
+#   - target_color: forzar a un color específico (default: auto-detectar)
+#   - skip_cutover: aplicar deployments pero NO switchear Ingress (para testing)
+# =========================================================
+name: Deploy to OKE (Blue/Green)
+
+on:
+  workflow_dispatch:
+    inputs:
+      image_tag:
+        description: 'Tag de imagen a deployar (develop, latest, o SHA específico)'
+        required: true
+        default: develop
+        type: string
+      target_color:
+        description: 'Color destino (auto = opuesto del activo)'
+        required: true
+        default: auto
+        type: choice
+        options:
+          - auto
+          - blue
+          - green
+      skip_cutover:
+        description: 'Aplicar deployments pero NO switchear Ingress (para validar antes del cutover)'
+        required: false
+        default: false
+        type: boolean
+
+permissions:
+  contents: read
+
+jobs:
+  deploy:
+    name: Deploy ${{ inputs.image_tag }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install kubectl
+        uses: azure/setup-kubectl@v4
+        with:
+          version: 'v1.32.0'
+
+      - name: Write kubeconfigs from secrets
+        run: |
+          echo "${{ secrets.OKE_KUBECONFIG_BLUE }}"  | base64 -d > /tmp/kc-blue.yaml
+          echo "${{ secrets.OKE_KUBECONFIG_GREEN }}" | base64 -d > /tmp/kc-green.yaml
+          chmod 600 /tmp/kc-blue.yaml /tmp/kc-green.yaml
+
+      - name: Determine active and target colors
+        id: colors
+        run: |
+          set -euo pipefail
+
+          # Detecta cuál Ingress existe (cada SA solo ve su propio namespace)
+          BLUE_EXISTS=$(KUBECONFIG=/tmp/kc-blue.yaml  kubectl get ingress taskbot -n vs-blue  --ignore-not-found -o name || true)
+          GREEN_EXISTS=$(KUBECONFIG=/tmp/kc-green.yaml kubectl get ingress taskbot -n vs-green --ignore-not-found -o name || true)
+
+          if [[ -n "$BLUE_EXISTS" && -n "$GREEN_EXISTS" ]]; then
+            echo "::error::Ambos Ingresses existen (split brain). Borra uno manualmente antes de re-deployar."
+            exit 1
+          elif [[ -n "$BLUE_EXISTS" ]]; then
+            ACTIVE=blue; AUTO_TARGET=green
+          elif [[ -n "$GREEN_EXISTS" ]]; then
+            ACTIVE=green; AUTO_TARGET=blue
+          else
+            ACTIVE=none; AUTO_TARGET=blue
+          fi
+
+          USER_TARGET="${{ inputs.target_color }}"
+          if [[ "$USER_TARGET" == "auto" ]]; then
+            TARGET=$AUTO_TARGET
+          else
+            TARGET=$USER_TARGET
+          fi
+
+          echo "active=$ACTIVE"  >> $GITHUB_OUTPUT
+          echo "target=$TARGET"  >> $GITHUB_OUTPUT
+
+          echo "::notice title=Deploy plan::Active=$ACTIVE → Target=$TARGET, Tag=${{ inputs.image_tag }}"
+
+      - name: Substitute IMAGE_TAG in target manifests
+        run: |
+          TARGET=${{ steps.colors.outputs.target }}
+          # Solo modifica los manifests del color destino. Los del color
+          # opuesto conservan IMAGE_TAG (placeholder) hasta su próximo turno.
+          sed -i "s|:IMAGE_TAG|:${{ inputs.image_tag }}|g" \
+            infra/k8s/40-apps/10-deployments-${TARGET}/*.yaml
+          
+          echo "Manifests con SHA sustituido:"
+          grep -h "image:" infra/k8s/40-apps/10-deployments-${TARGET}/*.yaml | sort -u
+
+      - name: Apply deployments to target color
+        run: |
+          TARGET=${{ steps.colors.outputs.target }}
+          KUBECONFIG=/tmp/kc-${TARGET}.yaml kubectl apply \
+            -f infra/k8s/40-apps/10-deployments-${TARGET}/
+
+      - name: Wait for BACKEND rollouts (blocking)
+        run: |
+          TARGET=${{ steps.colors.outputs.target }}
+          export KUBECONFIG=/tmp/kc-${TARGET}.yaml
+          for svc in auth-service kpi-service telegram-service ai-service task-service; do
+            echo "::group::Esperando $svc"
+            kubectl rollout status deployment/$svc -n vs-${TARGET} --timeout=300s
+            echo "::endgroup::"
+          done
+
+      - name: Wait for FRONTEND rollout (non-blocking)
+        continue-on-error: true
+        run: |
+          TARGET=${{ steps.colors.outputs.target }}
+          echo "::group::Esperando frontend (no bloquea si falla)"
+          KUBECONFIG=/tmp/kc-${TARGET}.yaml kubectl rollout status \
+            deployment/frontend -n vs-${TARGET} --timeout=180s || \
+            echo "::warning::Frontend no quedó Ready en 3min. Posible imagen privada o config; el resto del deploy continúa."
+          echo "::endgroup::"
+
+      - name: Apply target Ingress (cutover step 1/2)
+        if: ${{ inputs.skip_cutover != true }}
+        run: |
+          TARGET=${{ steps.colors.outputs.target }}
+          KUBECONFIG=/tmp/kc-${TARGET}.yaml kubectl apply \
+            -f infra/k8s/40-apps/30-ingress/ingress-${TARGET}.yaml
+          
+          # Espera unos segundos a que el NGINX Controller propague la regla
+          sleep 10
+
+      - name: Delete old Ingress (cutover step 2/2)
+        if: ${{ inputs.skip_cutover != true && steps.colors.outputs.active != 'none' && steps.colors.outputs.active != steps.colors.outputs.target }}
+        run: |
+          ACTIVE=${{ steps.colors.outputs.active }}
+          KUBECONFIG=/tmp/kc-${ACTIVE}.yaml kubectl delete ingress taskbot \
+            -n vs-${ACTIVE} --ignore-not-found
+
+      - name: Summary
+        if: always()
+        run: |
+          ACTIVE_OLD=${{ steps.colors.outputs.active }}
+          ACTIVE_NEW=${{ steps.colors.outputs.target }}
+          SKIPPED="${{ inputs.skip_cutover }}"
+
+          echo "## Deploy summary" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| Campo | Valor |" >> $GITHUB_STEP_SUMMARY
+          echo "|---|---|" >> $GITHUB_STEP_SUMMARY
+          echo "| Color previo | \`vs-${ACTIVE_OLD}\` |" >> $GITHUB_STEP_SUMMARY
+          if [[ "$SKIPPED" == "true" ]]; then
+            echo "| Color destino (aplicado, NO cutover) | \`vs-${ACTIVE_NEW}\` |" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "| Color ahora activo | \`vs-${ACTIVE_NEW}\` |" >> $GITHUB_STEP_SUMMARY
+          fi
+          echo "| Image tag | \`${{ inputs.image_tag }}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| Cutover | ${SKIPPED == 'true' && 'SKIPPED' || 'OK'} |" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          if [[ "$ACTIVE_OLD" != "none" && "$ACTIVE_OLD" != "$ACTIVE_NEW" && "$SKIPPED" != "true" ]]; then
+            echo "### 🔁 Rollback rápido" >> $GITHUB_STEP_SUMMARY
+            echo "Para volver al estado anterior, re-ejecuta este workflow con \`target_color: $ACTIVE_OLD\`." >> $GITHUB_STEP_SUMMARY
+          fi
