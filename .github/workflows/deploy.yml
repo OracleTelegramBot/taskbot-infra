@@ -5,7 +5,7 @@
 # Inputs:
 #   - image_tag: tag de las imágenes a deployar (e.g. develop, latest, SHA)
 #   - target_color: forzar a un color específico (default: auto-detectar)
-#   - skip_cutover: aplicar deployments pero NO switchear Ingress (para testing)
+#   - skip_cutover: aplicar deployments pero NO switchear Ingress (para testing) 
 # =========================================================
 name: Deploy to OKE (Blue/Green)
 
