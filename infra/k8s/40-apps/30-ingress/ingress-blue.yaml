@@ -48,9 +48,15 @@ spec:
             pathType: Prefix
             backend:
               service: { name: task-service, port: { number: 8084 } }
-          # === Swagger UI por servicio ===
-          - path: /swagger-ui/auth.html
+          # === Swagger UI por servicio (HTML entrypoint) ===
+          - path: /swagger-ui-auth.html
             pathType: Exact
+            backend:
+              service:
+                name: auth-service
+                port: { number: 8082 }
+          - path: /swagger-ui-auth
+            pathType: Prefix
             backend:
               service:
                 name: auth-service
@@ -62,8 +68,14 @@ spec:
                 name: auth-service
                 port: { number: 8082 }
 
-          - path: /swagger-ui/kpi.html
+          - path: /swagger-ui-kpi.html
             pathType: Exact
+            backend:
+              service:
+                name: kpi-service
+                port: { number: 8080 }
+          - path: /swagger-ui-kpi
+            pathType: Prefix
             backend:
               service:
                 name: kpi-service
@@ -75,8 +87,14 @@ spec:
                 name: kpi-service
                 port: { number: 8080 }
 
-          - path: /swagger-ui/ai.html
+          - path: /swagger-ui-ai.html
             pathType: Exact
+            backend:
+              service:
+                name: ai-service
+                port: { number: 8083 }
+          - path: /swagger-ui-ai
+            pathType: Prefix
             backend:
               service:
                 name: ai-service
@@ -88,8 +106,14 @@ spec:
                 name: ai-service
                 port: { number: 8083 }
 
-          - path: /swagger-ui/task.html
+          - path: /swagger-ui-task.html
             pathType: Exact
+            backend:
+              service:
+                name: task-service
+                port: { number: 8084 }
+          - path: /swagger-ui-task
+            pathType: Prefix
             backend:
               service:
                 name: task-service
@@ -101,8 +125,14 @@ spec:
                 name: task-service
                 port: { number: 8084 }
 
-          - path: /swagger-ui/telegram.html
+          - path: /swagger-ui-telegram.html
             pathType: Exact
+            backend:
+              service:
+                name: telegram-service
+                port: { number: 8081 }
+          - path: /swagger-ui-telegram
+            pathType: Prefix
             backend:
               service:
                 name: telegram-service
@@ -114,7 +144,7 @@ spec:
                 name: telegram-service
                 port: { number: 8081 }
 
-          # === Assets compartidos de Swagger UI (CSS, JS, fonts) ===
+          # === Assets compartidos de Swagger UI ===
           - path: /swagger-ui
             pathType: Prefix
             backend:
