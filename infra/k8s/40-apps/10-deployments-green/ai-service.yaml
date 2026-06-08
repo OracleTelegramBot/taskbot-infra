@@ -43,7 +43,7 @@ spec:
             limits:   { cpu: 200m, memory: 256Mi }
       containers:
         - name: ai-service
-          image: ghcr.io/oracletelegrambot/taskbot-ai-service:IMAGE_TAG
+          image: ghcr.io/oracletelegrambot/taskbot-ai-service:1c0b5c41cc877a84c352a6bbc8c17d6fe0eb4a83
           imagePullPolicy: IfNotPresent
           ports:
             - { name: http, containerPort: 8083, protocol: TCP }

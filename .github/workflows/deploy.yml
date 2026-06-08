@@ -60,21 +60,21 @@ jobs:
           set -e
           echo "=== Tamaño y primeras líneas de kubeconfigs ==="
           ls -la /tmp/kc-*.yaml
-          
+
           echo "=== Test blue ==="
           KUBECONFIG=/tmp/kc-blue.yaml kubectl version --client=false --output=yaml || {
             echo "::error::kubectl no puede conectar con kubeconfig-blue"
             head -20 /tmp/kc-blue.yaml
             exit 1
           }
-          
+
           echo "=== Test green ==="
           KUBECONFIG=/tmp/kc-green.yaml kubectl version --client=false --output=yaml || {
             echo "::error::kubectl no puede conectar con kubeconfig-green"
             head -20 /tmp/kc-green.yaml
             exit 1
           }
-          
+
           echo "✅ Ambos kubeconfigs funcionan"
 
       - name: Determine active and target colors
@@ -112,7 +112,7 @@ jobs:
           TARGET=${{ steps.colors.outputs.target }}
           sed -i "s|:IMAGE_TAG|:${{ inputs.image_tag }}|g" \
             infra/k8s/40-apps/10-deployments-${TARGET}/*.yaml
-          
+
           echo "Imágenes que se van a aplicar:"
           grep -h "image:" infra/k8s/40-apps/10-deployments-${TARGET}/*.yaml | sort -u
 
@@ -142,20 +142,47 @@ jobs:
             echo "::warning::Frontend no quedó Ready (probablemente imagen privada). El resto del deploy continúa."
           echo "::endgroup::"
 
-      - name: Apply target Ingress (cutover step 1/2)
+      # =========================================================================
+      # CUTOVER: delete viejo → apply nuevo
+      #
+      # El admission webhook de NGINX Ingress impide que dos Ingresses tengan el
+      # mismo host+path simultáneamente (aunque sean de namespaces distintos),
+      # por eso NO podemos hacer "apply nuevo → delete viejo". Hay que invertirlo.
+      #
+      # Trade-off: ~5-10 segundos de downtime durante el cutover (entre delete
+      # del viejo y apply del nuevo). Aceptable para deploys esporádicos.
+      # =========================================================================
+      - name: Cutover (delete old Ingress, then apply new)
+        if: ${{ inputs.skip_cutover != true }}
+        run: |
+          set -e
+          ACTIVE=${{ steps.colors.outputs.active }}
+          TARGET=${{ steps.colors.outputs.target }}
+
+          if [[ "$ACTIVE" != "none" && "$ACTIVE" != "$TARGET" ]]; then
+            echo "::group::Deleting active Ingress in vs-${ACTIVE}"
+            KUBECONFIG=/tmp/kc-${ACTIVE}.yaml kubectl delete ingress taskbot \
+              -n vs-${ACTIVE} --ignore-not-found
+            # Breve espera para que NGINX procese la baja antes de aplicar el nuevo
+            sleep 5
+            echo "::endgroup::"
+          else
+            echo "No hay Ingress activo previo en otro color, saltando paso de delete."
+          fi
+
+          echo "::group::Applying new Ingress in vs-${TARGET}"
+          KUBECONFIG=/tmp/kc-${TARGET}.yaml kubectl apply \
+            -f infra/k8s/40-apps/30-ingress/ingress-${TARGET}.yaml
+          # Espera para que NGINX reconcile y empiece a servir desde el nuevo Ingress
+          sleep 10
+          echo "::endgroup::"
+
+      - name: Verify cutover
         if: ${{ inputs.skip_cutover != true }}
         run: |
           TARGET=${{ steps.colors.outputs.target }}
-          KUBECONFIG=/tmp/kc-${TARGET}.yaml kubectl apply \
-            -f infra/k8s/40-apps/30-ingress/ingress-${TARGET}.yaml
-          sleep 10
-
-      - name: Delete old Ingress (cutover step 2/2)
-        if: ${{ inputs.skip_cutover != true && steps.colors.outputs.active != 'none' && steps.colors.outputs.active != steps.colors.outputs.target }}
-        run: |
-          ACTIVE=${{ steps.colors.outputs.active }}
-          KUBECONFIG=/tmp/kc-${ACTIVE}.yaml kubectl delete ingress taskbot \
-            -n vs-${ACTIVE} --ignore-not-found
+          echo "Ingress activo en vs-${TARGET}:"
+          KUBECONFIG=/tmp/kc-${TARGET}.yaml kubectl get ingress taskbot -n vs-${TARGET} -o wide
 
       - name: Summary
         if: always()
@@ -164,7 +191,6 @@ jobs:
           ACTIVE_NEW="${{ steps.colors.outputs.target }}"
           SKIPPED="${{ inputs.skip_cutover }}"
 
-          # bash ternary apropiado
           if [[ "$SKIPPED" == "true" ]]; then
             CUTOVER_STATUS="SKIPPED"
           else

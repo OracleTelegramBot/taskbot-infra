@@ -22,7 +22,7 @@ spec:
       # Sin initContainer — telegram-service no toca DB, no necesita wallet
       containers:
         - name: telegram-service
-          image: ghcr.io/oracletelegrambot/taskbot-telegram-service:IMAGE_TAG
+          image: ghcr.io/oracletelegrambot/taskbot-telegram-service:1c0b5c41cc877a84c352a6bbc8c17d6fe0eb4a83
           imagePullPolicy: IfNotPresent
           ports:
             - { name: http, containerPort: 8081, protocol: TCP }
