@@ -184,6 +184,139 @@ jobs:
           echo "Ingress activo en vs-${TARGET}:"
           KUBECONFIG=/tmp/kc-${TARGET}.yaml kubectl get ingress taskbot -n vs-${TARGET} -o wide
 
+      # =========================================================================
+      # SMOKE TESTS POST-CUTOVER
+      #
+      # Verifica que el dominio responde correctamente tras el switch.
+      # Si cualquier endpoint crítico devuelve 5xx, marca el step como failed
+      # y dispara el auto-rollback en el siguiente step.
+      #
+      # Criterios:
+      # - 2xx, 3xx, 4xx → OK (backend responde, aunque la request sea inválida)
+      # - 5xx           → FAIL (backend roto)
+      # - Timeout       → FAIL (backend colgado)
+      # =========================================================================
+      - name: Post-cutover smoke tests
+        id: smoke
+        if: ${{ inputs.skip_cutover != true }}
+        continue-on-error: true
+        run: |
+          set -e
+          DOMAIN="sammy-ulfh.dev"
+          
+          echo "Esperando 15 seg para que NGINX reconcile el nuevo Ingress..."
+          sleep 15
+
+          declare -a FAILURES=()
+
+          # Endpoints públicos críticos: deben responder algo != 5xx
+          # Cada entrada: "METHOD|PATH|DESCRIPCION"
+          ENDPOINTS=(
+            "POST|/api/v1/auth/login|Auth login"
+            "GET|/api/kpis|KPI list"
+            "GET|/api/ai|AI root"
+            "GET|/api/sprints|Tasks sprints"
+            "GET|/v3/api-docs/auth|OpenAPI spec auth"
+            "GET|/v3/api-docs/kpi|OpenAPI spec kpi"
+            "GET|/v3/api-docs/ai|OpenAPI spec ai"
+            "GET|/v3/api-docs/task|OpenAPI spec task"
+            "GET|/v3/api-docs/telegram|OpenAPI spec telegram"
+            "GET|/swagger-ui/index.html|Swagger UI"
+            "GET|/|Frontend SPA"
+          )
+
+          echo "::group::Smoke tests"
+          for entry in "${ENDPOINTS[@]}"; do
+            IFS='|' read -r METHOD PATH_ DESC <<< "$entry"
+            
+            if [[ "$METHOD" == "POST" ]]; then
+              CODE=$(curl -so /dev/null -w "%{http_code}" \
+                -X POST "https://${DOMAIN}${PATH_}" \
+                -H "Content-Type: application/json" \
+                -d '{}' \
+                --max-time 10 || echo "000")
+            else
+              CODE=$(curl -so /dev/null -w "%{http_code}" \
+                "https://${DOMAIN}${PATH_}" \
+                --max-time 10 || echo "000")
+            fi
+
+            if [[ "$CODE" == "000" ]]; then
+              echo "❌ ${DESC} (${METHOD} ${PATH_}) → TIMEOUT/CONNECTION_ERROR"
+              FAILURES+=("${DESC}: timeout")
+            elif [[ "$CODE" -ge 500 ]]; then
+              echo "❌ ${DESC} (${METHOD} ${PATH_}) → HTTP ${CODE}"
+              FAILURES+=("${DESC}: HTTP ${CODE}")
+            else
+              echo "✓ ${DESC} (${METHOD} ${PATH_}) → HTTP ${CODE}"
+            fi
+          done
+          echo "::endgroup::"
+
+          if [[ ${#FAILURES[@]} -gt 0 ]]; then
+            echo "::error title=Smoke tests fallaron::Detectados ${#FAILURES[@]} endpoints con error 5xx o timeout"
+            for f in "${FAILURES[@]}"; do
+              echo "  - $f"
+            done
+            exit 1
+          fi
+
+          echo "✅ Todos los smoke tests pasaron (${#ENDPOINTS[@]} endpoints OK)"
+
+      # =========================================================================
+      # AUTO-ROLLBACK
+      #
+      # Si los smoke tests fallaron Y había un color activo previo (no es el
+      # primer deploy), revertir: borrar Ingress del color nuevo y re-aplicar
+      # el del viejo.
+      # 
+      # Esto NO toca los Deployments — los pods del color malo siguen ahí pero
+      # sin recibir tráfico. Útil para debug post-mortem.
+      # =========================================================================
+      - name: Auto-rollback on smoke test failure
+        if: ${{ steps.smoke.outcome == 'failure' && inputs.skip_cutover != true && steps.colors.outputs.active != 'none' && steps.colors.outputs.active != steps.colors.outputs.target }}
+        run: |
+          set -e
+          ACTIVE=${{ steps.colors.outputs.active }}
+          TARGET=${{ steps.colors.outputs.target }}
+
+          echo "::error title=ROLLBACK AUTOMÁTICO::Smoke tests fallaron. Revirtiendo de vs-${TARGET} a vs-${ACTIVE}."
+
+          # Step 1: borra el Ingress del color malo
+          echo "::group::Borrando Ingress del color destino (vs-${TARGET})"
+          KUBECONFIG=/tmp/kc-${TARGET}.yaml kubectl delete ingress taskbot \
+            -n vs-${TARGET} --ignore-not-found
+          sleep 5
+          echo "::endgroup::"
+
+          # Step 2: re-aplica el Ingress del color viejo
+          echo "::group::Re-aplicando Ingress del color anterior (vs-${ACTIVE})"
+          KUBECONFIG=/tmp/kc-${ACTIVE}.yaml kubectl apply \
+            -f infra/k8s/40-apps/30-ingress/ingress-${ACTIVE}.yaml
+          sleep 10
+          echo "::endgroup::"
+
+          # Step 3: verifica que el rollback quedó activo
+          KUBECONFIG=/tmp/kc-${ACTIVE}.yaml kubectl get ingress taskbot -n vs-${ACTIVE} -o wide
+
+          echo "::warning title=Rollback completado::Tráfico de vuelta en vs-${ACTIVE}. Investiga los pods de vs-${TARGET} antes del próximo deploy."
+          
+          # Falla el workflow para que quede claro en GitHub Actions que algo salió mal
+          exit 1
+
+      # =========================================================================
+      # FALLO DE SMOKE TESTS SIN ROLLBACK POSIBLE
+      #
+      # Si es el primer deploy (no había color activo previo) y los smoke tests
+      # fallaron, no podemos hacer rollback. Solo fallamos el workflow.
+      # =========================================================================
+      - name: Fail workflow if smoke tests failed without rollback option
+        if: ${{ steps.smoke.outcome == 'failure' && (steps.colors.outputs.active == 'none' || steps.colors.outputs.active == steps.colors.outputs.target) }}
+        run: |
+          echo "::error::Smoke tests fallaron en deploy inicial (no hay color anterior al cual revertir)."
+          echo "::error::Los pods están deployed pero el dominio devuelve errores. Investiga antes de servir tráfico."
+          exit 1
+
       - name: Summary
         if: always()
         run: |
@@ -191,8 +324,12 @@ jobs:
           ACTIVE_NEW="${{ steps.colors.outputs.target }}"
           SKIPPED="${{ inputs.skip_cutover }}"
 
+          SMOKE_OUTCOME="${{ steps.smoke.outcome }}"
+          
           if [[ "$SKIPPED" == "true" ]]; then
             CUTOVER_STATUS="SKIPPED"
+          elif [[ "$SMOKE_OUTCOME" == "failure" ]]; then
+            CUTOVER_STATUS="ROLLED_BACK (smoke tests failed)"
           else
             CUTOVER_STATUS="OK"
           fi
