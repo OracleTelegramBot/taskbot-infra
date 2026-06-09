@@ -27,3 +27,4 @@ crash.*.log
 # OCI key files si por error los pones aquí
 *.pem
 *.secrets
+certs/
