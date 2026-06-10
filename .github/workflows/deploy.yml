@@ -116,6 +116,16 @@ jobs:
           echo "Imágenes que se van a aplicar:"
           grep -h "image:" infra/k8s/40-apps/10-deployments-${TARGET}/*.yaml | sort -u
 
+      - name: Apply Redis to target color
+        run: |
+          TARGET=${{ steps.colors.outputs.target }}
+          KUBECONFIG=/tmp/kc-${TARGET}.yaml kubectl apply \
+            -f infra/k8s/40-apps/05-redis/redis-${TARGET}.yaml
+
+          # Esperar a que Redis esté Ready antes de desplegar telegram-service
+          KUBECONFIG=/tmp/kc-${TARGET}.yaml kubectl rollout status \
+            deployment/redis -n vs-${TARGET} --timeout=120s
+
       - name: Apply deployments to target color
         run: |
           TARGET=${{ steps.colors.outputs.target }}

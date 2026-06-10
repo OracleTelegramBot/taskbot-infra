@@ -36,7 +36,10 @@ spec:
             # Service DNS dentro del MISMO namespace. vs-blue solo ve vs-blue,
             # vs-green solo ve vs-green. Aislamiento blue/green respetado.
             - { name: FEIGN_CLIENT_CONFIG_KPI_SERVICE_URL, value: "http://kpi-service:8080" }
+            - { name: FEIGN_CLIENT_CONFIG_TASK_SERVICE_URL, value: "http://task-service:8084" }
             - { name: AUTH_SERVICE_URL, value: "http://auth-service:8082" }
+            - { name: REDIS_HOST, value: "redis" }
+            - { name: REDIS_PORT, value: "6379" }
             - { name: POD_NAME, valueFrom: { fieldRef: { fieldPath: metadata.name } } }
             - { name: POD_NAMESPACE, valueFrom: { fieldRef: { fieldPath: metadata.namespace } } }
           # Sin volumeMounts (no wallet)
