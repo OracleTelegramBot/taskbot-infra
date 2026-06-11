@@ -142,14 +142,29 @@ jobs:
             echo "::endgroup::"
           done
 
-      - name: Wait for FRONTEND rollout (non-blocking)
-        continue-on-error: true
+      - name: Restart and verify frontend rollout
         run: |
           TARGET=${{ steps.colors.outputs.target }}
+          export KUBECONFIG=/tmp/kc-${TARGET}.yaml
+          
           echo "::group::frontend"
-          KUBECONFIG=/tmp/kc-${TARGET}.yaml kubectl rollout status \
-            deployment/frontend -n vs-${TARGET} --timeout=180s || \
-            echo "::warning::Frontend no quedó Ready (probablemente imagen privada). El resto del deploy continúa."
+          
+          # 1. Forzar nuevo ReplicaSet → dispara image pull en los pods nuevos
+          # Necesario porque el manifest del frontend usa :latest hardcoded,
+          # entonces kubectl apply no detecta cambios y no dispara rollout por sí solo.
+          echo "Triggering rollout restart to pull latest image..."
+          kubectl rollout restart deployment/frontend -n vs-${TARGET}
+          
+          # 2. Esperar a que el rollout complete
+          kubectl rollout status deployment/frontend -n vs-${TARGET} --timeout=180s || \
+            echo "::warning::Frontend no quedó Ready (probablemente imagen privada o no actualizada). El resto del deploy continúa."
+          
+          # 3. Log informativo: mostrar el imageID actual de los pods nuevos
+          # (útil para diagnosticar si la imagen efectivamente cambió)
+          echo "Imagen efectiva en pods de frontend:"
+          kubectl get pods -n vs-${TARGET} -l app=frontend \
+            -o jsonpath='{range .items[*]}{.metadata.name}{": "}{.status.containerStatuses[0].imageID}{"\n"}{end}' || true
+          
           echo "::endgroup::"
 
       # =========================================================================

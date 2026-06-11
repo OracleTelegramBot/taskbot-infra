@@ -22,7 +22,7 @@ spec:
       containers:
         - name: frontend
           image: ghcr.io/lilianaramosvz/taskbot-frontend:latest
-          imagePullPolicy: IfNotPresent
+          imagePullPolicy: Always
           ports:
             - { name: http, containerPort: 80, protocol: TCP }
           env:
