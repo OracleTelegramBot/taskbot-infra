@@ -35,13 +35,30 @@ workspace "TaskBot" "Modelo de arquitectura C4 de la plataforma de gestión de t
             authSvc = container "auth-service" "Autenticación con JWT, hash BCrypt, gestión de roles y de perfiles de usuario (Auth + User Management)." "Spring Boot · JAR · :8082" "Microservice"
 
             taskSvc = container "task-service" "Gestión de tareas, estados, horas y del ciclo de vida de proyectos y sprints (Task + Project & Sprint)." "Spring Boot · JAR · :8084" "Microservice" {
-                taskController   = component "TaskController" "API REST de tareas (/api/tasks): crear, asignar, cambiar estado, registrar horas." "Spring MVC"
-                taskService      = component "TaskService" "Lógica de negocio de tareas (Task Management Component de Sprint 1)." "Spring Service"
-                sprintController = component "SprintController" "API REST de sprints y proyectos (/api/sprints)." "Spring MVC"
-                sprintService    = component "SprintService" "Ciclo de vida de sprints: crear, iniciar, cerrar (Project & Sprint Component de Sprint 1)." "Spring Service"
-                taskRepo         = component "TaskRepository" "Acceso a datos de tareas." "Spring Data JPA"
-                sprintRepo       = component "SprintRepository" "Acceso a datos de proyectos y sprints." "Spring Data JPA"
-                kpiClient        = component "KpiFeignClient" "Cliente declarativo hacia kpi-service para disparar cálculos al completar tareas." "Spring Cloud OpenFeign"
+                taskController   = component "TaskController" "API REST de tareas (/api/tasks): crear, asignar, cambiar estado, registrar horas." "Spring MVC" {
+                    url "https://github.com/OracleTelegramBot/Backend/blob/develop/docs/diagrams/task-service-TaskController.puml"
+                }
+                taskService      = component "TaskService" "Lógica de negocio de tareas y sprints (Task Management Component de Sprint 1)." "Spring Service" {
+                    url "https://github.com/OracleTelegramBot/Backend/blob/develop/docs/diagrams/task-service-TaskService.puml"
+                }
+                sprintController = component "SprintController" "API REST de sprints y proyectos (/api/sprints)." "Spring MVC" {
+                    url "https://github.com/OracleTelegramBot/Backend/blob/develop/docs/diagrams/task-service-SprintController.puml"
+                }
+                taskRepo         = component "TareaRepository" "Acceso a datos de tareas." "Spring Data JPA" {
+                    url "https://github.com/OracleTelegramBot/Backend/blob/develop/docs/diagrams/task-service-TareaRepository.puml"
+                }
+                sprintRepo       = component "SprintRepository" "Acceso a datos de proyectos y sprints." "Spring Data JPA" {
+                    url "https://github.com/OracleTelegramBot/Backend/blob/develop/docs/diagrams/task-service-SprintRepository.puml"
+                }
+                registroHorasRepo = component "RegistroHorasRepository" "Acceso a datos de registro de horas." "Spring Data JPA" {
+                    url "https://github.com/OracleTelegramBot/Backend/blob/develop/docs/diagrams/task-service-RegistroHorasRepository.puml"
+                }
+                usuarioTareaRepo  = component "UsuarioTareaRepository" "Acceso a datos de relación usuario-tarea." "Spring Data JPA" {
+                    url "https://github.com/OracleTelegramBot/Backend/blob/develop/docs/diagrams/task-service-UsuarioTareaRepository.puml"
+                }
+                kpiClient        = component "KpiServiceClient" "Cliente declarativo hacia kpi-service para disparar cálculos al completar tareas." "Spring Cloud OpenFeign" {
+                    url "https://github.com/OracleTelegramBot/Backend/blob/develop/docs/diagrams/task-service-KpiServiceClient.puml"
+                }
             }
 
             kpiSvc = container "kpi-service" "Cálculo de KPIs (horas por sprint, tareas por developer, velocidad), reportes y comparativas históricas." "Spring Boot · WAR · :8080" "Microservice"
@@ -85,15 +102,18 @@ workspace "TaskBot" "Modelo de arquitectura C4 de la plataforma de gestión de t
 
         # Relaciones internas del task-service (vista de componentes)
         taskbot.taskSvc.taskController   -> taskbot.taskSvc.taskService   "Invoca la lógica de tareas"
-        taskbot.taskSvc.sprintController -> taskbot.taskSvc.sprintService "Invoca la lógica de sprints"
+        taskbot.taskSvc.sprintController -> taskbot.taskSvc.taskService   "Invoca la lógica de sprints"
         taskbot.taskSvc.taskService      -> taskbot.taskSvc.taskRepo      "Lee/escribe tareas"
-        taskbot.taskSvc.sprintService    -> taskbot.taskSvc.sprintRepo    "Lee/escribe sprints y proyectos"
+        taskbot.taskSvc.taskService      -> taskbot.taskSvc.sprintRepo    "Lee/escribe sprints y proyectos"
+        taskbot.taskSvc.taskService      -> taskbot.taskSvc.registroHorasRepo "Lee/escribe registro de horas"
+        taskbot.taskSvc.taskService      -> taskbot.taskSvc.usuarioTareaRepo  "Lee/escribe relación usuario-tarea"
         taskbot.taskSvc.taskService      -> taskbot.taskSvc.kpiClient     "Notifica tarea completada"
         taskbot.taskSvc.kpiClient        -> taskbot.kpiSvc                "Dispara cálculo de KPI" "REST (Feign)"
-        taskbot.taskSvc.taskService      -> taskbot.telegramSvc          "Notifica tarea bloqueada" "REST"
-        taskbot.taskSvc.sprintService    -> taskbot.telegramSvc          "Avisa de sprint próximo a vencer" "REST"
+        taskbot.taskSvc.taskService      -> taskbot.telegramSvc          "Notifica tarea bloqueada o sprint próximo a vencer" "REST"
         taskbot.taskSvc.taskRepo         -> taskbot.db                   "Persiste tareas" "JDBC + Wallet"
         taskbot.taskSvc.sprintRepo       -> taskbot.db                   "Persiste sprints y proyectos" "JDBC + Wallet"
+        taskbot.taskSvc.registroHorasRepo -> taskbot.db                  "Persiste registro de horas" "JDBC + Wallet"
+        taskbot.taskSvc.usuarioTareaRepo  -> taskbot.db                  "Persiste relación usuario-tarea" "JDBC + Wallet"
 
         # Relaciones de nivel sistema (CI/CD y Jira)
         cicd    -> taskbot "Construye imágenes y despliega a OKE" "GitHub Actions"
