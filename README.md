@@ -159,4 +159,77 @@ Flujo en el que un Developer cambia el estado de una tarea a `Blocked`. El `task
 | [`architecture/`](./architecture) | Definición de la arquitectura en Structurizr DSL |
 ---
 
-*TaskBot · Sprint 3 · Infraestructura sobre Oracle Cloud Infrastructure*
+## Sprint 5 — Nivel 4 (Código): Generación automática de diagramas de clases
+
+Esta entrega automatiza la generación del Nivel 4 (Code) del modelo C4 para el contenedor `task-service`, manteniendo la documentación de arquitectura sincronizada con el código fuente mediante el pipeline de CI/CD. Se actualizó el modelo para reflejar el código real (renombres de `TaskRepository` a `TareaRepository`, `KpiFeignClient` a `KpiServiceClient`, y se agregaron componentes faltantes).
+
+### Funcionamiento
+
+1. El plugin `plantuml-generator-maven-plugin` lee las clases compiladas de `task-service` y genera un archivo `.puml` por cada componente del Nivel 3.
+2. Un workflow de GitHub Actions regenera los diagramas en cada push que modifique código Java de `task-service` y los commitea automáticamente al repositorio.
+3. Cada componente del Nivel 3 en `model.dsl` incluye la propiedad `url` apuntando a su diagrama de clases, navegable desde Structurizr con doble click.
+
+### Ubicación de los entregables
+
+| Entregable | Ubicación |
+|---|---|
+| Configuración del plugin (build config) | [`task-service/pom.xml`](https://github.com/OracleTelegramBot/Backend/blob/develop/taskbot-backend/task-service/pom.xml) — repo Backend |
+| Pipeline de generación | [`architecture-diagrams.yml`](https://github.com/OracleTelegramBot/Backend/blob/develop/.github/workflows/architecture-diagrams.yml) — repo Backend |
+| Diagramas generados (`.puml`) | [`docs/diagrams/`](https://github.com/OracleTelegramBot/Backend/tree/develop/docs/diagrams) — repo Backend |
+| DSL con componentes enlazados | [`architecture/model.dsl`](./architecture/model.dsl) — este repositorio |
+
+### Diagramas de clases generados (Nivel 4)
+
+<!-- Renderizados en vivo desde los .puml del repo Backend vía proxy de PlantUML. Se actualizan automáticamente cuando el pipeline regenera los archivos. -->
+
+#### TaskService
+
+<p align="center">
+  <img src="http://www.plantuml.com/plantuml/proxy?cache=no&src=https://raw.githubusercontent.com/OracleTelegramBot/Backend/develop/docs/diagrams/task-service-TaskService.puml" alt="TaskService Class Diagram" width="900">
+</p>
+
+#### TaskController
+
+<p align="center">
+  <img src="http://www.plantuml.com/plantuml/proxy?cache=no&src=https://raw.githubusercontent.com/OracleTelegramBot/Backend/develop/docs/diagrams/task-service-TaskController.puml" alt="TaskController Class Diagram" width="900">
+</p>
+
+#### SprintController
+
+<p align="center">
+  <img src="http://www.plantuml.com/plantuml/proxy?cache=no&src=https://raw.githubusercontent.com/OracleTelegramBot/Backend/develop/docs/diagrams/task-service-SprintController.puml" alt="SprintController Class Diagram" width="900">
+</p>
+
+#### TareaRepository
+
+<p align="center">
+  <img src="http://www.plantuml.com/plantuml/proxy?cache=no&src=https://raw.githubusercontent.com/OracleTelegramBot/Backend/develop/docs/diagrams/task-service-TareaRepository.puml" alt="TareaRepository Class Diagram" width="900">
+</p>
+
+#### SprintRepository
+
+<p align="center">
+  <img src="http://www.plantuml.com/plantuml/proxy?cache=no&src=https://raw.githubusercontent.com/OracleTelegramBot/Backend/develop/docs/diagrams/task-service-SprintRepository.puml" alt="SprintRepository Class Diagram" width="900">
+</p>
+
+#### RegistroHorasRepository
+
+<p align="center">
+  <img src="http://www.plantuml.com/plantuml/proxy?cache=no&src=https://raw.githubusercontent.com/OracleTelegramBot/Backend/develop/docs/diagrams/task-service-RegistroHorasRepository.puml" alt="RegistroHorasRepository Class Diagram" width="900">
+</p>
+
+#### UsuarioTareaRepository
+
+<p align="center">
+  <img src="http://www.plantuml.com/plantuml/proxy?cache=no&src=https://raw.githubusercontent.com/OracleTelegramBot/Backend/develop/docs/diagrams/task-service-UsuarioTareaRepository.puml" alt="UsuarioTareaRepository Class Diagram" width="900">
+</p>
+
+#### KpiServiceClient
+
+<p align="center">
+  <img src="http://www.plantuml.com/plantuml/proxy?cache=no&src=https://raw.githubusercontent.com/OracleTelegramBot/Backend/develop/docs/diagrams/task-service-KpiServiceClient.puml" alt="KpiServiceClient Class Diagram" width="900">
+</p>
+
+---
+
+*TaskBot · Sprint 5 · Infraestructura sobre Oracle Cloud Infrastructure*
